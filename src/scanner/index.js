@@ -25,6 +25,8 @@ export async function scanProject(projectPath) {
     return {
       status: ScanStatus.FAILED,
       projectPath: discovery.resolvedPath,
+      projectMetadata: null,
+      lockfileVersion: null,
       errors,
       warnings,
       components: [],
@@ -38,6 +40,8 @@ export async function scanProject(projectPath) {
     return {
       status: ScanStatus.FAILED,
       projectPath: discovery.resolvedPath,
+      projectMetadata: null,
+      lockfileVersion: null,
       errors,
       warnings,
       components: [],
@@ -54,6 +58,8 @@ export async function scanProject(projectPath) {
     return {
       status: ScanStatus.FAILED,
       projectPath: discovery.resolvedPath,
+      projectMetadata: null,
+      lockfileVersion: null,
       errors,
       warnings,
       components: [],
@@ -64,8 +70,10 @@ export async function scanProject(projectPath) {
 
   // Step 3: Parse package-lock.json (if present)
   let lockfileResult = null;
+  let detectedLockfileVersion = null;
   if (discovery.packageLockPath) {
     lockfileResult = parsePackageLock(discovery.packageLockPath);
+    detectedLockfileVersion = lockfileResult.lockfileVersion;
     errors.push(...lockfileResult.errors);
     warnings.push(...lockfileResult.warnings);
 
@@ -94,6 +102,11 @@ export async function scanProject(projectPath) {
       return {
         status: ScanStatus.FAILED,
         projectPath: discovery.resolvedPath,
+        projectMetadata: {
+          name: pkgJsonResult.data.name,
+          version: pkgJsonResult.data.version,
+        },
+        lockfileVersion: detectedLockfileVersion,
         errors,
         warnings,
         components: [],
@@ -146,7 +159,7 @@ export async function scanProject(projectPath) {
       name: pkgJsonResult.data.name,
       version: pkgJsonResult.data.version,
     },
-    lockfileVersion: lockfileResult?.lockfileVersion || null,
+    lockfileVersion: lockfileResult?.lockfileVersion ?? detectedLockfileVersion ?? null,
     errors,
     warnings,
     components: componentsArray,

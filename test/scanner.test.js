@@ -27,6 +27,7 @@ describe('Scanner Integration Tests', () => {
 
       const isNumber = result.components.find(c => c.name === 'is-number');
       assert.ok(isNumber);
+      assert.equal(isNumber.version, '6.0.0');
       assert.equal(isNumber.dependencyType, 'transitive');
 
       // BOM should be generated
@@ -190,9 +191,54 @@ describe('Scanner Integration Tests', () => {
     });
   });
 
+  describe('Fixture 13: unsupported-lockfile-project', () => {
+    it('detects unsupported lockfile version and falls back to partial scan', async () => {
+      const result = await scanProject(path.join(fixturesDir, 'unsupported-lockfile-project'));
+
+      assert.equal(result.status, 'partial');
+      assert.equal(result.lockfileVersion, 1);
+      assert.ok(result.errors.some(e => e.code === 'UNSUPPORTED_LOCKFILE_VERSION'));
+      assert.equal(result.bom, null, 'No CycloneDX BOM should be generated for partial scans');
+
+      const ms = result.components.find(c => c.name === 'ms');
+      assert.ok(ms);
+      assert.equal(ms.dependencyType, 'direct');
+      assert.equal(ms.version, null, 'Version should be null in fallback partial scan');
+      assert.equal(ms.versionRange, '2.1.3');
+    });
+  });
+
   describe('Project path validation', () => {
     it('returns PROJECT_NOT_FOUND for non-existent directory', async () => {
       const result = await scanProject('/nonexistent/path/to/project');
+
+      assert.equal(result.status, 'failed');
+      assert.ok(result.errors.some(e => e.code === 'PROJECT_NOT_FOUND'));
+    });
+
+    it('returns PROJECT_NOT_FOUND for empty or whitespace paths', async () => {
+      const emptyResult = await scanProject('');
+      assert.equal(emptyResult.status, 'failed');
+      assert.ok(emptyResult.errors.some(e => e.code === 'PROJECT_NOT_FOUND'));
+
+      const wsResult = await scanProject('   ');
+      assert.equal(wsResult.status, 'failed');
+      assert.ok(wsResult.errors.some(e => e.code === 'PROJECT_NOT_FOUND'));
+    });
+
+    it('returns PROJECT_NOT_FOUND for null or non-string paths', async () => {
+      const nullResult = await scanProject(null);
+      assert.equal(nullResult.status, 'failed');
+      assert.ok(nullResult.errors.some(e => e.code === 'PROJECT_NOT_FOUND'));
+
+      const undefResult = await scanProject(undefined);
+      assert.equal(undefResult.status, 'failed');
+      assert.ok(undefResult.errors.some(e => e.code === 'PROJECT_NOT_FOUND'));
+    });
+
+    it('returns PROJECT_NOT_FOUND when target path is a file instead of a directory', async () => {
+      const filePath = path.join(fixturesDir, 'simple-project', 'package.json');
+      const result = await scanProject(filePath);
 
       assert.equal(result.status, 'failed');
       assert.ok(result.errors.some(e => e.code === 'PROJECT_NOT_FOUND'));
@@ -248,6 +294,44 @@ describe('Scanner Integration Tests', () => {
         assert.ok(allRefs.has(comp['bom-ref']),
           `Component ${comp.name} should have a dependency entry`);
       }
+    });
+  });
+
+  describe('Structured output format', () => {
+    it('returns consistent structured contract matching specification', async () => {
+      const result = await scanProject(path.join(fixturesDir, 'simple-project'));
+
+      assert.equal(typeof result, 'object');
+      assert.ok(['complete', 'partial', 'failed'].includes(result.status));
+      assert.equal(typeof result.projectPath, 'string');
+      assert.ok(result.projectMetadata && typeof result.projectMetadata.name === 'string');
+      assert.ok(result.projectMetadata && typeof result.projectMetadata.version === 'string');
+      assert.ok(typeof result.lockfileVersion === 'number' || result.lockfileVersion === null);
+      assert.ok(Array.isArray(result.errors));
+      assert.ok(Array.isArray(result.warnings));
+      assert.ok(Array.isArray(result.components));
+      assert.equal(typeof result.dependencyEdges, 'object');
+
+      for (const comp of result.components) {
+        assert.ok(typeof comp.name === 'string');
+        assert.ok(typeof comp.ecosystem === 'string');
+        assert.ok(typeof comp.bomRef === 'string');
+        assert.ok(['root', 'direct', 'transitive'].includes(comp.dependencyType));
+        assert.ok(Array.isArray(comp.dependencyGroups));
+      }
+    });
+
+    it('returns structured object on failure without throwing or printing', async () => {
+      const result = await scanProject('/nonexistent/directory');
+
+      assert.equal(result.status, 'failed');
+      assert.equal(result.projectMetadata, null);
+      assert.equal(result.lockfileVersion, null);
+      assert.ok(Array.isArray(result.errors));
+      assert.ok(Array.isArray(result.warnings));
+      assert.deepEqual(result.components, []);
+      assert.deepEqual(result.dependencyEdges, {});
+      assert.equal(result.bom, null);
     });
   });
 });

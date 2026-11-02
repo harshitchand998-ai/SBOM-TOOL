@@ -1,0 +1,9 @@
+{
+  "name": "unsupported-lockfile-project",
+  "version": "1.0.0",
+  "description": "Test fixture for unsupported lockfile version (v1)",
+  "dependencies": {
+    "ms": "2.1.3"
+  }
+}
+

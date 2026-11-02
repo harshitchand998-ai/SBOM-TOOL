@@ -108,8 +108,13 @@ describe('parsePackageLock', () => {
   });
 
   it('rejects unsupported lockfile versions', () => {
-    // We'll simulate this by checking if version 1 would be rejected
-    // For now, test that version 3 is accepted (tested above)
-    // and verify the SUPPORTED set doesn't include v1
+    const filePath = path.join(fixturesDir, 'unsupported-lockfile-project', 'package-lock.json');
+    const result = parsePackageLock(filePath);
+
+    assert.equal(result.data, null);
+    assert.equal(result.lockfileVersion, 1);
+    assert.ok(result.errors.length > 0);
+    assert.equal(result.errors[0].code, 'UNSUPPORTED_LOCKFILE_VERSION');
+    assert.ok(result.errors[0].message.includes('Unsupported npm lockfile version: 1'));
   });
 });

@@ -28,6 +28,23 @@ const UNSUPPORTED_LOCKFILES = Object.freeze({
 export function discoverProjectFiles(projectPath) {
   const errors = [];
   const warnings = [];
+
+  // Check valid path argument
+  if (typeof projectPath !== 'string' || projectPath.trim() === '') {
+    errors.push(createScanError(
+      ErrorCodes.PROJECT_NOT_FOUND,
+      `Project path must be a non-empty string, received: ${JSON.stringify(projectPath)}`,
+      { path: projectPath }
+    ));
+    return {
+      resolvedPath: typeof projectPath === 'string' ? projectPath : '',
+      packageJsonPath: null,
+      packageLockPath: null,
+      errors,
+      warnings,
+    };
+  }
+
   const resolvedPath = path.resolve(projectPath);
 
   // 1. Check existence
