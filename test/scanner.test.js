@@ -208,6 +208,23 @@ describe('Scanner Integration Tests', () => {
     });
   });
 
+  describe('Fixture 14: zero-deps-project', () => {
+    it('successfully scans a project with no dependencies', async () => {
+      const result = await scanProject(path.join(fixturesDir, 'zero-deps-project'));
+
+      assert.equal(result.status, 'complete');
+      assert.equal(result.errors.length, 0);
+      assert.equal(result.projectMetadata.name, 'zero-deps-project');
+      assert.equal(result.projectMetadata.version, '1.0.0');
+      assert.equal(result.components.length, 1);
+      assert.equal(result.components[0].isRoot, true);
+      assert.equal(result.components[0].name, 'zero-deps-project');
+      assert.deepEqual(result.dependencyEdges, { [result.components[0].bomRef]: [] });
+      assert.ok(result.bom);
+      assert.equal(result.bom.components.length, 0);
+    });
+  });
+
   describe('Project path validation', () => {
     it('returns PROJECT_NOT_FOUND for non-existent directory', async () => {
       const result = await scanProject('/nonexistent/path/to/project');
@@ -318,6 +335,28 @@ describe('Scanner Integration Tests', () => {
         assert.ok(typeof comp.bomRef === 'string');
         assert.ok(['root', 'direct', 'transitive'].includes(comp.dependencyType));
         assert.ok(Array.isArray(comp.dependencyGroups));
+        assert.ok(typeof comp.resolved === 'string' || comp.resolved === null);
+        assert.ok(typeof comp.integrity === 'string' || comp.integrity === null);
+        assert.ok(Array.isArray(comp.installPaths));
+      }
+    });
+
+    it('returns consistent component fields and null resolved for partial scans', async () => {
+      const result = await scanProject(path.join(fixturesDir, 'missing-lockfile-project'));
+
+      assert.equal(result.status, 'partial');
+      assert.equal(result.lockfileVersion, null);
+      assert.ok(result.components.length > 0);
+
+      for (const comp of result.components) {
+        assert.ok(typeof comp.name === 'string');
+        assert.ok(typeof comp.ecosystem === 'string');
+        assert.ok(typeof comp.bomRef === 'string');
+        assert.ok(['root', 'direct', 'transitive'].includes(comp.dependencyType));
+        assert.ok(Array.isArray(comp.dependencyGroups));
+        assert.equal(comp.resolved, null, 'resolved should be null when not resolved via lockfile');
+        assert.equal(comp.integrity, null, 'integrity should be null in manifest-only scan');
+        assert.ok(Array.isArray(comp.installPaths));
       }
     });
 
