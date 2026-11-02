@@ -80,6 +80,12 @@ export function resolveDependencies(packageJsonData, lockfileData) {
     bomRef: rootRef,
     dependencyType: 'root',
     dependencyGroups: [],
+    integrity: null,
+    resolved: null,
+    installPaths: [],
+    optional: false,
+    dev: false,
+    devOptional: false,
     isRoot: true,
   });
   dependencyEdges.set(rootRef, new Set());
@@ -260,6 +266,19 @@ export function resolveDependencies(packageJsonData, lockfileData) {
     }
   }
 
+  // Step 3: Ensure exact direct vs transitive classification based on actual root graph edges
+  const directRefs = dependencyEdges.get(rootRef) || new Set();
+  for (const [bomRef, comp] of components.entries()) {
+    if (comp.isRoot) continue;
+    if (directRefs.has(bomRef)) {
+      comp.dependencyType = 'direct';
+      comp.dependencyGroups = directDependencyGroups.get(comp.name) || [];
+    } else {
+      comp.dependencyType = 'transitive';
+      comp.dependencyGroups = [];
+    }
+  }
+
   return { components, dependencyEdges, rootRef, warnings };
 }
 
@@ -351,6 +370,12 @@ export function resolveManifestOnly(packageJsonData) {
     bomRef: rootRef,
     dependencyType: 'root',
     dependencyGroups: [],
+    integrity: null,
+    resolved: null,
+    installPaths: [],
+    optional: false,
+    dev: false,
+    devOptional: false,
     isRoot: true,
   });
   dependencyEdges.set(rootRef, new Set());
@@ -376,7 +401,12 @@ export function resolveManifestOnly(packageJsonData) {
           bomRef,
           dependencyType: 'direct',
           dependencyGroups: [groupName],
-          resolved: false,
+          integrity: null,
+          resolved: null,
+          installPaths: [],
+          optional: groupName === 'optionalDependencies',
+          dev: groupName === 'devDependencies',
+          devOptional: false,
         });
         dependencyEdges.set(bomRef, new Set());
       } else {

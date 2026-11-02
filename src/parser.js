@@ -82,15 +82,22 @@ export function parsePackageJson(filePath) {
     ));
   }
 
+  const normalizeDependencyMap = (rawMap) => {
+    if (typeof rawMap === 'object' && rawMap !== null && !Array.isArray(rawMap)) {
+      return rawMap;
+    }
+    return {};
+  };
+
   const data = {
     name,
     version,
     description: parsed.description || '',
     license: parsed.license || '',
-    dependencies: parsed.dependencies || {},
-    devDependencies: parsed.devDependencies || {},
-    optionalDependencies: parsed.optionalDependencies || {},
-    peerDependencies: parsed.peerDependencies || {},
+    dependencies: normalizeDependencyMap(parsed.dependencies),
+    devDependencies: normalizeDependencyMap(parsed.devDependencies),
+    optionalDependencies: normalizeDependencyMap(parsed.optionalDependencies),
+    peerDependencies: normalizeDependencyMap(parsed.peerDependencies),
   };
 
   return { data, errors, warnings };

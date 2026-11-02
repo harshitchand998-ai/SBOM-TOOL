@@ -5,17 +5,31 @@ A lightweight, reusable JavaScript engine and tool for generating Software Bill 
 ## Project Structure
 
 ```text
-├── package.json          # Project metadata, dependencies, and scripts
-├── .gitignore            # Git ignore configuration
-├── README.md             # Project documentation and setup guide
+├── package.json               # Project metadata, dependencies, bin, and scripts
+├── .gitignore                 # Git ignore configuration
+├── README.md                  # Project documentation and setup guide
+├── docs/
+│   └── scanner-contract.md    # Formal scanner data contract specification
+├── fixtures/                  # 15 comprehensive test fixture projects
 ├── src/
-│   ├── index.js          # Main library entry point
-│   ├── engine/           # Reusable SBOM engine core
-│   │   └── index.js      # Initial engine implementation (entry point)
-│   └── scanner/          # npm dependency scanner (Phase 2+)
-│       └── index.js      # Scanner module stub
+│   ├── index.js               # Main package entry point
+│   ├── engine/                # Reusable engine core
+│   │   └── index.js           # Initial decoupled engine entry point
+│   ├── scanner/               # npm dependency scanner orchestration
+│   │   └── index.js           # scanProject implementation
+│   ├── fileDiscovery.js       # Target path and lockfile discovery
+│   ├── parser.js              # package.json and package-lock.json parsing
+│   ├── dependencyResolver.js  # Graph resolution, multiple versions, and classifications
+│   ├── cyclonedxGenerator.js  # CycloneDX 1.7 JSON SBOM generator
+│   ├── validator.js           # Structural SBOM validation
+│   ├── errors.js              # Standard error codes and status enums
+│   └── cli.js                 # Command-line interface
 └── test/
-    └── engine.test.js    # Unit tests for the engine
+    ├── engine.test.js         # Engine entry point tests
+    ├── parser.test.js         # Manifest and lockfile parser tests
+    ├── dependencyResolver.test.js # Dependency resolution tests
+    ├── cyclonedxGenerator.test.js # SBOM output and graph tests
+    └── scanner.test.js        # End-to-end integration tests (15 fixtures)
 ```
 
 ## Prerequisites
@@ -25,7 +39,7 @@ A lightweight, reusable JavaScript engine and tool for generating Software Bill 
 
 ## Installation
 
-Install dependencies (if any are added) using npm:
+Install dependencies using npm:
 
 ```bash
 npm install
@@ -33,34 +47,45 @@ npm install
 
 ## Available Scripts
 
-- **`npm test`**: Runs the test suite using Node.js's built-in test runner (`node --test`).
-- **`npm run check`**: Runs syntax validation checks across all source and test JavaScript files using `node --check`.
+- **`npm test`**: Runs the complete automated test suite via Node's native test runner (`node --test`).
+- **`npm run test:scanner`**: Runs integration tests for the project scanner across all fixture scenarios.
+- **`npm run test:parser`**: Runs unit tests for `package.json` and `package-lock.json` parsing.
+- **`npm run test:resolver`**: Runs unit tests for dependency graph resolution and classification.
+- **`npm run test:cyclonedx`**: Runs unit tests for CycloneDX 1.7 SBOM generation and schema validation.
+- **`npm run scan <path>`**: Runs the CLI scanner against a specified target project path.
+- **`npm run check`**: Runs syntax validation checks across all source files using `node --check`.
+
+## Scanner Data Contract
+
+For detailed input/output models, component schemas, error codes, and fixture mappings, see the [Scanner Contract Specification](docs/scanner-contract.md).
 
 ## Programmatic Usage
 
-The core engine is decoupled from UI, CLI, or database layers and can be imported and consumed programmatically:
+The project exports both the initial decoupled engine and the npm scanner:
 
 ```javascript
-import { runEngine, generateSbom } from 'npm-sbom-tool';
+import { scanProject, runEngine } from "npm-sbom-tool";
 
-const result = await runEngine('./path/to/target-project');
-console.log(result);
-// Output structure:
-// {
-//   targetPath: '/absolute/path/to/target-project',
-//   status: 'initialized',
-//   timestamp: '2026-10-31T...',
-//   engine: { name: 'npm-sbom-tool', version: '0.1.0' },
-//   options: {},
-//   data: null
-// }
+// 1. Scan an npm project and obtain structured results and CycloneDX SBOM
+const result = await scanProject("./fixtures/simple-project");
+
+console.log(result.status); // 'complete' | 'partial' | 'failed'
+console.log(result.projectMetadata); // { name: 'simple-project', version: '1.0.0' }
+console.log(result.components); // Array of discovered components
+console.log(result.dependencyEdges); // Graph adjacency map
+console.log(result.bom); // CycloneDX 1.7 JSON object (or null)
+
+// 2. Core engine entry point (Order 1)
+const engineData = await runEngine("./fixtures/simple-project");
+console.log(engineData.status); // 'initialized'
 ```
 
-## Upcoming Phases
+## Command-Line Usage
 
-- **Phase 2**: Target project scanning (`package.json`, `package-lock.json`, `node_modules`).
-- **Phase 3**: Dependency tree parsing and graph construction.
-- **Phase 4**: SBOM standard format output (CycloneDX / SPDX).
-- **Phase 5**: Vulnerability and anomaly detection.
-- **Phase 6**: CLI and Web UI layers.
+```bash
+# Scan a project and generate an SBOM
+node src/cli.js scan ./path/to/project --output ./bom.cdx.json
 
+# Using npm script
+npm run scan fixtures/simple-project
+```

@@ -245,10 +245,85 @@ describe('Dependency Resolver', () => {
       assert.equal(express.versionRange, '^4.18.0');
       assert.equal(express.dependencyType, 'direct');
       assert.ok(express.dependencyGroups.includes('dependencies'));
+      assert.equal(express.resolved, null, 'resolved should be null for manifest-only partial scans');
+      assert.equal(express.integrity, null, 'integrity should be null for manifest-only partial scans');
+      assert.ok(Array.isArray(express.installPaths), 'installPaths should be an array');
+      assert.equal(express.installPaths.length, 0);
 
       const jest = [...result.components.values()].find(c => c.name === 'jest');
       assert.ok(jest);
       assert.ok(jest.dependencyGroups.includes('devDependencies'));
+    });
+  });
+
+  describe('nested conflicting versions with root declaration', () => {
+    it('correctly classifies nested conflicting package as transitive when root declares a direct dependency with same name', () => {
+      const mockPkgJson = {
+        name: 'test-app',
+        version: '1.0.0',
+        dependencies: {
+          'foo-parent': '1.0.0',
+          'shared-pkg': '2.0.0',
+        },
+      };
+
+      const mockLockfile = {
+        packages: {
+          '': { name: 'test-app', version: '1.0.0' },
+          'node_modules/foo-parent': {
+            version: '1.0.0',
+            dependencies: { 'shared-pkg': '1.0.0' },
+          },
+          'node_modules/foo-parent/node_modules/shared-pkg': {
+            version: '1.0.0',
+            resolved: 'https://registry.npmjs.org/shared-pkg/-/shared-pkg-1.0.0.tgz',
+          },
+          'node_modules/shared-pkg': {
+            version: '2.0.0',
+            resolved: 'https://registry.npmjs.org/shared-pkg/-/shared-pkg-2.0.0.tgz',
+          },
+        },
+      };
+
+      const result = resolveDependencies(mockPkgJson, mockLockfile);
+
+      // Root + foo-parent + shared-pkg@2.0.0 + shared-pkg@1.0.0 = 4 components
+      assert.equal(result.components.size, 4);
+
+      const sharedDirect = [...result.components.values()].find(c => c.name === 'shared-pkg' && c.version === '2.0.0');
+      assert.ok(sharedDirect);
+      assert.equal(sharedDirect.dependencyType, 'direct', 'Root declared version 2.0.0 should be direct');
+      assert.deepEqual(sharedDirect.dependencyGroups, ['dependencies']);
+
+      const sharedTransitive = [...result.components.values()].find(c => c.name === 'shared-pkg' && c.version === '1.0.0');
+      assert.ok(sharedTransitive);
+      assert.equal(sharedTransitive.dependencyType, 'transitive', 'Nested conflicting version 1.0.0 should be transitive');
+      assert.deepEqual(sharedTransitive.dependencyGroups, []);
+    });
+  });
+
+  describe('zero-dependency project', () => {
+    it('handles projects with empty dependency lists cleanly', () => {
+      const mockPkgJson = {
+        name: 'zero-dep-app',
+        version: '1.0.0',
+        dependencies: {},
+      };
+
+      const mockLockfile = {
+        packages: {
+          '': { name: 'zero-dep-app', version: '1.0.0' },
+        },
+      };
+
+      const result = resolveDependencies(mockPkgJson, mockLockfile);
+
+      assert.equal(result.components.size, 1, 'Only root component should exist');
+      const root = [...result.components.values()][0];
+      assert.equal(root.name, 'zero-dep-app');
+      assert.equal(root.isRoot, true);
+      assert.equal(result.dependencyEdges.get(result.rootRef).size, 0, 'Root edges should be empty');
+      assert.equal(result.warnings.length, 0);
     });
   });
 });
