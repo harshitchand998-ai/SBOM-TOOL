@@ -67,6 +67,17 @@ describe('parsePackageJson', () => {
     assert.deepEqual(result.data.optionalDependencies, {});
     assert.deepEqual(result.data.peerDependencies, {});
   });
+
+  it('extracts empty dependency groups for zero-deps project', () => {
+    const filePath = path.join(fixturesDir, 'zero-deps-project', 'package.json');
+    const result = parsePackageJson(filePath);
+
+    assert.equal(result.errors.length, 0);
+    assert.deepEqual(result.data.dependencies, {});
+    assert.deepEqual(result.data.devDependencies, {});
+    assert.deepEqual(result.data.optionalDependencies, {});
+    assert.deepEqual(result.data.peerDependencies, {});
+  });
 });
 
 describe('parsePackageLock', () => {
