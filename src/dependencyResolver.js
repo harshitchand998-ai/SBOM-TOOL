@@ -1,4 +1,5 @@
 import { ErrorCodes, createScanError } from './errors.js';
+import { buildDependencyGraph } from './dependencyGraph.js';
 
 /**
  * Extracts the package name from a lockfile key (e.g., "node_modules/express" → "express",
@@ -67,8 +68,6 @@ export function resolveDependencies(packageJsonData, lockfileData) {
 
   // Components map: bomRef → component data
   const components = new Map();
-  // Dependency edges: bomRef → Set<bomRef>
-  const dependencyEdges = new Map();
 
   // Root application component
   const rootRef = `pkg:npm/${encodePackageName(packageJsonData.name)}@${packageJsonData.version}`;
@@ -88,7 +87,6 @@ export function resolveDependencies(packageJsonData, lockfileData) {
     devOptional: false,
     isRoot: true,
   });
-  dependencyEdges.set(rootRef, new Set());
 
   // Map from lockfile key to bomRef for resolving dependency edges
   const keyToBomRef = new Map();
@@ -151,7 +149,6 @@ export function resolveDependencies(packageJsonData, lockfileData) {
         dev: pkgEntry.dev || false,
         devOptional: pkgEntry.devOptional || false,
       });
-      dependencyEdges.set(bomRef, new Set());
     } else {
       // Same package+version at a different path — add the install path
       const existing = components.get(bomRef);
@@ -166,105 +163,20 @@ export function resolveDependencies(packageJsonData, lockfileData) {
     keyToBomRef.set(lockKey, bomRef);
   }
 
-  // Step 2: Resolve dependency edges using a graph traversal approach
-  // For each package, look up its declared dependencies and resolve them
-  // to the correct installed package (handling nested node_modules).
-  for (const [lockKey, pkgEntry] of Object.entries(packages)) {
-    if (lockKey === '') {
-      // Root entry — resolve edges from rootRef to its direct dependencies
-      const allRootDeps = {
-        ...rootDeps,
-        ...rootDevDeps,
-        ...rootOptDeps,
-      };
-
-      // Also include peer dependencies that are resolved
-      for (const peerName of Object.keys(rootPeerDeps)) {
-        if (!allRootDeps[peerName]) {
-          allRootDeps[peerName] = rootPeerDeps[peerName];
-        }
-      }
-
-      for (const depName of Object.keys(allRootDeps)) {
-        const resolvedKey = resolvePackageKey(lockKey, depName, packages);
-        if (resolvedKey && keyToBomRef.has(resolvedKey)) {
-          dependencyEdges.get(rootRef).add(keyToBomRef.get(resolvedKey));
-        } else {
-          // Check if this is an optional or peer dependency before warning
-          const isOptional = rootOptDeps[depName] !== undefined;
-          const isPeer = rootPeerDeps[depName] !== undefined && !rootDeps[depName] && !rootDevDeps[depName];
-          if (isPeer) {
-            warnings.push(createScanError(
-              ErrorCodes.UNRESOLVED_DEPENDENCY,
-              `Peer dependency "${depName}" declared by root project is not resolved in the lockfile.`,
-              { dependency: depName, parent: packageJsonData.name }
-            ));
-          } else if (isOptional) {
-            warnings.push(createScanError(
-              ErrorCodes.UNRESOLVED_DEPENDENCY,
-              `Optional dependency "${depName}" declared by root project is not resolved in the lockfile.`,
-              { dependency: depName, parent: packageJsonData.name }
-            ));
-          } else {
-            warnings.push(createScanError(
-              ErrorCodes.UNRESOLVED_DEPENDENCY,
-              `Dependency "${depName}" declared by root project could not be resolved from the lockfile.`,
-              { dependency: depName, parent: packageJsonData.name }
-            ));
-          }
-        }
-      }
-      continue;
-    }
-
-    // Skip entries we didn't index (links, versionless)
-    if (!keyToBomRef.has(lockKey)) continue;
-
-    const parentBomRef = keyToBomRef.get(lockKey);
-    const entryDeps = {
-      ...(pkgEntry.dependencies || {}),
-      ...(pkgEntry.optionalDependencies || {}),
-    };
-
-    // Include resolved peer dependencies
-    if (pkgEntry.peerDependencies) {
-      for (const [peerName, peerRange] of Object.entries(pkgEntry.peerDependencies)) {
-        // Only add if not already in dependencies and if it's not marked as optional peer
-        const peerMeta = pkgEntry.peerDependenciesMeta || {};
-        const isOptionalPeer = peerMeta[peerName]?.optional === true;
-        if (!entryDeps[peerName]) {
-          // Try to resolve it — if it resolves, add the edge; if not and it's optional, skip silently
-          const resolvedKey = resolvePackageKey(lockKey, peerName, packages);
-          if (resolvedKey && keyToBomRef.has(resolvedKey)) {
-            entryDeps[peerName] = peerRange;
-          } else if (!isOptionalPeer) {
-            warnings.push(createScanError(
-              ErrorCodes.UNRESOLVED_DEPENDENCY,
-              `Peer dependency "${peerName}" of "${extractPackageName(lockKey)}" is not resolved in the lockfile.`,
-              { dependency: peerName, parent: extractPackageName(lockKey) }
-            ));
-          }
-        }
-      }
-    }
-
-    for (const depName of Object.keys(entryDeps)) {
-      const resolvedKey = resolvePackageKey(lockKey, depName, packages);
-      if (resolvedKey && keyToBomRef.has(resolvedKey)) {
-        dependencyEdges.get(parentBomRef).add(keyToBomRef.get(resolvedKey));
-      } else {
-        // Check if this is from optionalDependencies
-        const isOptionalDep = pkgEntry.optionalDependencies && pkgEntry.optionalDependencies[depName];
-        if (!isOptionalDep) {
-          warnings.push(createScanError(
-            ErrorCodes.UNRESOLVED_DEPENDENCY,
-            `Dependency "${depName}" required by "${extractPackageName(lockKey)}" could not be resolved from the lockfile.`,
-            { dependency: depName, parent: extractPackageName(lockKey) }
-          ));
-        }
-      }
-    }
-  }
+  // Step 2: Build the dependency graph using the standalone graph builder
+  const graphResult = buildDependencyGraph({
+    components,
+    keyToBomRef,
+    packages,
+    rootRef,
+    rootDeps,
+    rootDevDeps,
+    rootOptDeps,
+    rootPeerDeps,
+    rootName: packageJsonData.name,
+  });
+  const dependencyEdges = graphResult.dependencyEdges;
+  warnings.push(...graphResult.warnings);
 
   // Step 3: Ensure exact direct vs transitive classification based on actual root graph edges
   const directRefs = dependencyEdges.get(rootRef) || new Set();
@@ -280,54 +192,6 @@ export function resolveDependencies(packageJsonData, lockfileData) {
   }
 
   return { components, dependencyEdges, rootRef, warnings };
-}
-
-/**
- * Resolves a dependency name to the correct lockfile key by walking
- * up the node_modules tree from the parent's install path.
- *
- * npm installs dependencies in the nearest node_modules that satisfies the
- * version requirement. When a conflict exists, it nests the dependency under
- * the parent's own node_modules. The lockfile represents this as:
- *   node_modules/parent/node_modules/dep
- *
- * This function searches from the most specific (nested) path outward to
- * the top-level node_modules.
- *
- * @param {string} parentKey - Lockfile key of the parent package.
- * @param {string} depName - Name of the dependency to resolve.
- * @param {object} packages - The packages section from the lockfile.
- * @returns {string|null} The lockfile key of the resolved package, or null if not found.
- */
-function resolvePackageKey(parentKey, depName, packages) {
-  // For scoped packages, depName is like "@scope/name"
-  // For the root (""), the dependency is at "node_modules/<depName>"
-
-  if (parentKey === '') {
-    // Root project — dependency is at node_modules/<depName>
-    const candidate = `node_modules/${depName}`;
-    if (packages[candidate] !== undefined) return candidate;
-    return null;
-  }
-
-  // For non-root packages, walk up the tree
-  // parentKey is like "node_modules/express" or "node_modules/express/node_modules/accepts"
-  // First try: parentKey + "/node_modules/" + depName
-  let searchBase = parentKey;
-  while (true) {
-    const candidate = `${searchBase}/node_modules/${depName}`;
-    if (packages[candidate] !== undefined) return candidate;
-
-    // Walk up: remove the last "/node_modules/<pkg>" segment
-    const lastNM = searchBase.lastIndexOf('/node_modules/');
-    if (lastNM === -1) {
-      // We've exhausted nested paths — try top-level
-      const topLevel = `node_modules/${depName}`;
-      if (packages[topLevel] !== undefined) return topLevel;
-      return null;
-    }
-    searchBase = searchBase.substring(0, lastNM);
-  }
 }
 
 /**
