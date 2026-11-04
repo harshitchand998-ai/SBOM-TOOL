@@ -1,0 +1,15 @@
+{
+  "name": "workspace-multi-project",
+  "version": "2.0.0",
+  "description": "Multi-workspace project with object config and dependencies",
+  "workspaces": {
+    "packages": [
+      "packages/*",
+      "apps/*"
+    ]
+  },
+  "dependencies": {
+    "frontend": "^1.0.0"
+  }
+}
+

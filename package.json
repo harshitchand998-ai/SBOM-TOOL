@@ -13,9 +13,10 @@
     "test:parser": "node --test test/parser.test.js",
     "test:resolver": "node --test test/dependencyResolver.test.js",
     "test:graph": "node --test test/dependencyGraph.test.js",
+    "test:workspace": "node --test test/workspaceDiscovery.test.js",
     "test:cyclonedx": "node --test test/cyclonedxGenerator.test.js",
     "scan": "node src/cli.js scan",
-    "check": "node --check src/index.js src/engine/index.js src/scanner/index.js src/cli.js src/errors.js src/fileDiscovery.js src/parser.js src/dependencyResolver.js src/dependencyGraph.js src/cyclonedxGenerator.js src/validator.js"
+    "check": "node --check src/index.js src/engine/index.js src/scanner/index.js src/cli.js src/errors.js src/fileDiscovery.js src/parser.js src/dependencyResolver.js src/dependencyGraph.js src/workspaceDiscovery.js src/cyclonedxGenerator.js src/validator.js"
   },
   "keywords": [
     "sbom",

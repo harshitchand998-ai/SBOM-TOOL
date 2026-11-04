@@ -1,0 +1,9 @@
+{
+  "name": "authentication",
+  "version": "1.0.0",
+  "description": "Authentication module",
+  "dependencies": {
+    "@company/shared-utils": "^1.0.0"
+  }
+}
+
