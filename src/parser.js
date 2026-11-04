@@ -53,15 +53,7 @@ export function parsePackageJson(filePath) {
     return { data: null, errors, warnings };
   }
 
-  // Detect workspace configurations (unsupported in V1)
-  if (parsed.workspaces) {
-    errors.push(createScanError(
-      ErrorCodes.UNSUPPORTED_WORKSPACE_LAYOUT,
-      'npm workspaces are not supported in this version of the scanner.',
-      { file: 'package.json' }
-    ));
-    return { data: null, errors, warnings };
-  }
+  const workspaces = parsed.workspaces !== undefined ? parsed.workspaces : null;
 
   const name = parsed.name || 'unnamed-project';
   const version = parsed.version || '0.0.0';
@@ -94,6 +86,7 @@ export function parsePackageJson(filePath) {
     version,
     description: parsed.description || '',
     license: parsed.license || '',
+    workspaces,
     dependencies: normalizeDependencyMap(parsed.dependencies),
     devDependencies: normalizeDependencyMap(parsed.devDependencies),
     optionalDependencies: normalizeDependencyMap(parsed.optionalDependencies),
