@@ -798,7 +798,7 @@ describe('First-Party Component & Workspace Discovery', () => {
         assert.equal(result.status, 'complete');
         assert.ok(
           result.warnings.some(
-            w => w.code === 'UNRESOLVED_DEPENDENCY' && w.message.includes('matched no packages')
+            w => w.code === 'UNSUPPORTED_WORKSPACE_LAYOUT' && w.message.includes('matched no packages')
           )
         );
       } finally {
