@@ -1,0 +1,9 @@
+{
+  "name": "pkg-b",
+  "version": "1.0.0",
+  "description": "Workspace package B",
+  "dependencies": {
+    "is-number": "^7.0.0"
+  }
+}
+

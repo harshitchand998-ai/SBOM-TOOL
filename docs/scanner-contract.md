@@ -1,15 +1,19 @@
 # Scanner Data Contract Specification
 
-This document defines the formal data contract for the `npm-sbom-tool` project scanner (`scanProject`). It serves as the canonical reference for scanner inputs, outputs, data models, error handling, and behavioral semantics.
+This document defines the formal data contract for the `npm-sbom-tool` project scanner (`scanProject` and `scanProjectSync`). It serves as the canonical reference for scanner inputs, outputs, data models, error handling, workspace discovery, and behavioral semantics.
 
 ---
 
 ## 1. Scanner Input Specification
 
-The scanner entry point is an asynchronous JavaScript function exported from `src/scanner/index.js` (and re-exported by `src/index.js`):
+The scanner entry point is exported both asynchronously and synchronously from `src/scanner/index.js` (and re-exported by `src/index.js`):
 
 ```javascript
+// Asynchronous entry point
 async function scanProject(projectPath)
+
+// Synchronous entry point (guaranteed identical structured result)
+function scanProjectSync(projectPath)
 ```
 
 ### Parameters
@@ -25,7 +29,7 @@ async function scanProject(projectPath)
    - If `projectPath` is `null`, `undefined`, a non-string type, an empty string `""`, or a string containing only whitespace `"   "`, the scan immediately terminates with status `'failed'` and an error with code `PROJECT_NOT_FOUND`.
 2. **Filesystem Resolution**:
    - Relative paths are normalized to canonical absolute paths via `node:path.resolve(projectPath)`.
-   - Trailing slashes are normalized automatically.
+   - Trailing slashes and platform-specific backslashes (`\`) are normalized automatically to canonical forward slashes (`/`).
 3. **Directory Check**:
    - The resolved path must exist on disk and must be a directory (`stats.isDirectory() === true`).
    - If the path does not exist or points to a file, the scanner returns status `'failed'` with error code `PROJECT_NOT_FOUND`.
@@ -36,7 +40,7 @@ async function scanProject(projectPath)
 
 ## 2. Scanner Output Contract
 
-The scanner returns a JavaScript Promise resolving to a uniform structured object. The result shape is guaranteed to contain all standard keys across all three operational statuses (`'complete'`, `'partial'`, `'failed'`).
+The scanner returns a JavaScript Promise (or object for sync) resolving to a uniform structured object. The result shape is guaranteed to contain all standard keys across all operational statuses (`'complete'`, `'partial'`, `'failed'`).
 
 ### Top-Level Object Schema
 
@@ -62,9 +66,9 @@ interface ScanResult {
 | `projectPath` | `string` | Normalized absolute path of the scanned target. |
 | `projectMetadata` | `{ name: string, version: string } \| null` | Root package metadata from `package.json`, or `null` if manifest is missing/invalid. |
 | `lockfileVersion` | `number \| null` | Detected npm lockfile version (`2` or `3`), or `null` if missing/unparseable. |
-| `errors` | `ScanErrorItem[]` | Fatal or blocking issues encountered during the scan. |
-| `warnings` | `ScanErrorItem[]` | Non-fatal conditions (e.g. Unresolved optional dependencies, fallback warnings). |
-| `components` | `Component[]` | Flat list of all discovered components (root package + all dependencies). |
+| `errors` | `ScanErrorItem[]` | Fatal or blocking issues encountered during the scan (or workspace manifest errors). |
+| `warnings` | `ScanErrorItem[]` | Non-fatal conditions (e.g. Unresolved optional dependencies, incompatible workspace ranges, fallback warnings). |
+| `components` | `Component[]` | Flat list of all discovered components (root package + local workspaces + third-party dependencies). |
 | `dependencyEdges` | `Record<string, string[]>` | Adjacency list mapping parent component `bomRef` to array of child `bomRef`s. |
 | `bom` | `object \| null` | Generated CycloneDX 1.7 JSON SBOM (`null` for `'partial'` and `'failed'` scans). |
 
@@ -75,35 +79,38 @@ interface ScanResult {
 1. **`complete`**:
    - Both `package.json` and a supported `package-lock.json` (v2 or v3) were discovered and parsed.
    - All components, exact resolved versions, integrity hashes, and dependency graph edges were extracted.
+   - Any local npm workspaces were discovered and validated against lockfile symlinks.
    - A valid CycloneDX 1.7 JSON SBOM is populated in `bom`.
    - `errors` array is empty (`[]`).
 2. **`partial`**:
-   - `package.json` was parsed, but `package-lock.json` is missing, unparseable, or uses an unsupported version (e.g. V1).
-   - Direct dependencies declared in `package.json` are returned with version ranges (`version: null`, `versionRange: "^1.0.0"`).
+   - `package.json` was parsed, but `package-lock.json` is missing, unparseable, uses an unsupported version (e.g. V1), or non-fatal workspace errors occurred (e.g., malformed workspace manifest).
+   - Direct dependencies declared in manifests are returned with version ranges (`version: null`, `versionRange: "^1.0.0"`).
    - Transitive dependencies cannot be reliably resolved and are not fabricated.
    - `bom` is `null` because an incomplete manifest-only scan cannot guarantee exact CycloneDX SBOM integrity.
-   - Non-fatal warnings and/or fallback errors explaining the lockfile absence/limitation are populated.
+   - Non-fatal warnings and/or fallback errors explaining the lockfile absence or limitation are populated.
 3. **`failed`**:
    - Target path does not exist, is not a directory, or has invalid permissions.
-   - `package.json` is missing or contains invalid/unparseable JSON.
-   - Unsupported package managers (`yarn.lock`, `pnpm`, `bun`) or unsupported workspace configurations are detected.
+   - Root `package.json` is missing or contains invalid/unparseable JSON.
+   - Unsupported package managers (`yarn.lock`, `pnpm`, `bun`) are detected.
    - `components` is empty (`[]`), `dependencyEdges` is empty (`{}`), and `bom` is `null`.
 
 ---
 
 ## 4. Component Data Model
 
-Each dependency in `components` conforms to the following schema:
+Each component in `components` conforms to the following schema:
 
 ```typescript
 interface Component {
   name: string;
   version: string | null;
   versionRange?: string;
+  description?: string;
+  license?: string;
   ecosystem: 'npm';
   purl: string | null;
   bomRef: string;
-  dependencyType: 'root' | 'direct' | 'transitive';
+  dependencyType: 'root' | 'direct' | 'transitive' | 'workspace';
   dependencyGroups: string[];
   integrity: string | null;
   resolved: string | null;
@@ -112,44 +119,93 @@ interface Component {
   dev: boolean;
   devOptional: boolean;
   isRoot?: boolean;
+  isFirstParty?: boolean;
+  classification?: 'first-party' | 'third-party';
+  origin?: 'first-party' | 'third-party';
+  location?: {
+    resolved: string;
+    relative: string;
+  };
+  path?: string;
+  relativePath?: string;
+  workspaceDependencies?: string[];
 }
 ```
 
 ### Component Field Rules
 
-- **`name`**: Exact npm package name (including scope if applicable, e.g. `@babel/core`).
-- **`version`**: Exact resolved semantic version string from lockfile (e.g. `'2.1.3'`). In manifest-only partial scans, `version` is `null`.
-- **`versionRange`**: Declared version range from `package.json` (e.g. `'^4.18.0'`), populated during partial scans.
+- **`name`**: Exact npm package name (including scope if applicable, e.g. `@babel/core` or `@company/shared-utils`).
+- **`version`**: Exact resolved semantic version string from lockfile or workspace manifest (e.g. `'2.1.3'`). In manifest-only partial scans of third-party packages, `version` is `null`.
+- **`versionRange`**: Declared version range from manifest (e.g. `'^4.18.0'`), populated during partial scans.
 - **`ecosystem`**: Constant string `'npm'`.
 - **`purl`**: Standard Package URL format:
   - Standard package: `pkg:npm/ms@2.1.3`
   - Scoped package: `pkg:npm/%40scope/pkg@1.0.0` (scope `@` encoded as `%40`)
-  - Manifest-only partial scan: `null` (valid purls require exact resolved versions).
+  - Manifest-only partial scan: `null` for unconfirmed third-party packages (valid purls require exact resolved versions).
 - **`bomRef`**: Unique identifier used across dependency edges and CycloneDX SBOM:
-  - Complete scan: Matches `purl`.
+  - Complete scan: Matches `purl`, with optional `#<location>` disambiguation if identical package names/versions collide.
   - Manifest-only partial scan: `pkg:npm/<name>@<versionRange>`.
 - **`dependencyType`**:
-  - `'root'`: The root application being scanned.
-  - `'direct'`: Directly declared in root `package.json` and resolved in root graph edges.
+  - `'root'`: The root application being scanned (`isRoot: true`).
+  - `'workspace'`: Local first-party npm workspace package discovered in the repository.
+  - `'direct'`: External third-party package directly declared in root `package.json` and resolved in root graph edges.
   - `'transitive'`: Indirectly required by a parent dependency.
 - **`dependencyGroups`**: Array of root declaration groups (`'dependencies'`, `'devDependencies'`, `'optionalDependencies'`, `'peerDependencies'`). Direct dependencies reflect their declared group; transitive dependencies have `[]`.
 - **`integrity`**: Subresource integrity hash from lockfile (e.g. `sha512-...` or `sha1-...`), or `null` if unavailable or in partial scans.
 - **`resolved`**: Distribution tarball URL from lockfile (e.g. `https://registry.npmjs.org/ms/-/ms-2.1.3.tgz`), or `null` if unavailable or in partial scans. Always `string | null` (never boolean).
-- **`installPaths`**: Array of lockfile package paths where this component was resolved (e.g. `['node_modules/ms']`). Empty array `[]` in partial scans.
+- **`installPaths`**: Array of lockfile package paths where this component was resolved (e.g. `['node_modules/ms']` or `['node_modules/pkg-a']` for workspace symlinks).
 - **`optional`**: Boolean indicating optional dependency status.
 - **`dev`**: Boolean indicating development dependency status.
 - **`devOptional`**: Boolean indicating dev-optional status.
+- **`isRoot`**: Boolean flag set to `true` exclusively on the root application component.
+- **`isFirstParty`**: Boolean flag set to `true` on the root application and all local workspace components; `false` on external registry packages.
+- **`classification`**: String `'first-party'` for root and workspaces; `'third-party'` for external registry packages.
+- **`origin`**: String `'first-party'` or `'third-party'`.
+- **`location`**: Object containing `{ resolved: string, relative: string }` pointing to the physical filesystem directory of first-party components.
+- **`path`**: Absolute filesystem path for first-party components.
+- **`relativePath`**: Project-root-relative path for first-party components (e.g., `.` for root, `packages/core` for workspaces).
+- **`workspaceDependencies`**: Array of local workspace names directly depended upon.
 
 ---
 
-## 5. Direct vs. Transitive Classification
+## 5. First-Party Component Discovery & Workspace Resolution
 
-To prevent version-collision errors where a nested transitive dependency shares a name with a root dependency:
+### Root Application Representation
+- The root project declared in the root `package.json` is always discovered and included in `components`.
+- Root has `isRoot: true`, `isFirstParty: true`, `classification: 'first-party'`, `origin: 'first-party'`, `dependencyType: 'root'`, and `location: { resolved: <rootPath>, relative: '.' }`.
+- In CycloneDX SBOM output, the root application is placed in `metadata.component` (`type: 'application'`), while non-root components are placed in `bom.components` (`type: 'library'`).
 
-1. The root application (`isRoot: true`) directly links to its resolved dependencies via `dependencyEdges[rootRef]`.
-2. A component is classified as **`direct`** if and only if its `bomRef` is present in `dependencyEdges[rootRef]`.
-3. If another nested package requires a conflicting version of the same package name (e.g. Root requires `shared@2.0.0`, but child requires `shared@1.0.0`), the nested version is not linked from root and is correctly classified as **`transitive`**.
-4. Both versions are retained as distinct components with their respective `bomRef`s.
+### Local npm Workspace Packages
+- Supported workspace manifest formats:
+  - Array format: `"workspaces": ["packages/*", "apps/**"]`
+  - Object format: `"workspaces": { "packages": ["packages/*"] }`
+- Supported pattern syntax:
+  - Single wildcard: `packages/*`
+  - Recursive wildcard: `packages/**` and `packages/**/client`
+  - Single-character wildcard: `packages/pkg-?`
+  - Negation: `!packages/ignored-pkg`
+  - Normalization: Forward slashes and Windows backslashes (`packages\*`, `.\packages\*`) are automatically normalized.
+- Workspace packages are discovered by inspecting manifests in matched directories:
+  - Valid manifests are added to `components` with `dependencyType: 'workspace'`, `isFirstParty: true`, and `classification: 'first-party'`.
+  - Directories missing `package.json` report `PACKAGE_FILE_NOT_FOUND` errors.
+  - Directories with malformed `package.json` report `INVALID_PACKAGE_FILE` errors while preserving discovery of valid packages.
+
+### Lockfile Validation & Symlink Handling
+- In npm lockfile v2/v3, workspaces are referenced as:
+  1. A directory entry (e.g. `"packages/pkg-a"`).
+  2. A symlink entry in `node_modules/` (e.g. `"node_modules/pkg-a": { "resolved": "packages/pkg-a", "link": true }`).
+- The scanner detects `pkgEntry.link: true` and resolves the symlink to the corresponding discovered workspace package:
+  - The symlink path is recorded in the workspace component's `installPaths`.
+  - The symlink is mapped in the dependency resolver to the workspace component's `bomRef`.
+  - No unsupported layout warning or missing dependency warning is emitted for valid workspace links.
+- Workspace dependencies are verified against the lockfile:
+  - If a workspace declares a dependency that cannot be resolved in the lockfile, the scanner emits an `UNRESOLVED_DEPENDENCY` warning and does not invent an edge.
+  - Version compatibility is checked via semver range evaluation (`isVersionCompatible`). If a declared range is incompatible with the local workspace version, an `UNRESOLVED_DEPENDENCY` warning is reported and the edge is omitted.
+
+### Disambiguation and Conflict Prevention
+- **Root-to-workspace name collision**: If a workspace has the same name as the root package, unique `bomRef`s are preserved using location fragment suffixes (e.g. `pkg:npm/name@1.0.0#packages/core`).
+- **Duplicate workspace names**: If two workspace packages share the exact same package name, an `UNSUPPORTED_WORKSPACE_LAYOUT` error is recorded, unique `bomRef`s are maintained, and ambiguous cross-references between them are rejected to avoid linking to the wrong package.
+- **Third-party vs First-party classification**: External registry packages with the same name as a local workspace are not misclassified as first-party; remote resolution URLs and registry integrity hashes are inspected to maintain strict third-party classification.
 
 ---
 
@@ -167,6 +223,9 @@ interface ScanErrorItem {
   lockfileVersion?: number;
   dependency?: string;
   parent?: string;
+  workspace?: string;
+  declaredRange?: string;
+  localVersion?: string;
   originalError?: string;
 }
 ```
@@ -177,12 +236,12 @@ interface ScanErrorItem {
 |---|---|---|
 | `PROJECT_NOT_FOUND` | Fatal (Failure) | Path does not exist, is not a directory, is empty, or has invalid type. |
 | `PROJECT_ACCESS_DENIED` | Fatal (Failure) | Filesystem permission denied on target directory. |
-| `PACKAGE_FILE_NOT_FOUND` | Fatal (Failure) / Warning | Fatal when `package.json` missing; warning when `package-lock.json` missing (triggers partial scan). |
-| `INVALID_PACKAGE_FILE` | Fatal (Failure) / Fallback | Fatal when `package.json` is malformed JSON; triggers partial scan fallback when `package-lock.json` is malformed. |
+| `PACKAGE_FILE_NOT_FOUND` | Fatal (Failure) / Warning | Fatal when root `package.json` missing; warning when `package-lock.json` missing (triggers partial scan); non-fatal error when a workspace directory lacks `package.json`. |
+| `INVALID_PACKAGE_FILE` | Fatal (Failure) / Fallback | Fatal when root `package.json` is malformed JSON; triggers partial scan fallback when `package-lock.json` is malformed; non-fatal error when a workspace `package.json` is malformed. |
 | `UNSUPPORTED_LOCKFILE_VERSION` | Fallback | Lockfile version is not 2 or 3 (e.g. Version 1); falls back to partial scan. |
 | `UNSUPPORTED_PACKAGE_MANAGER` | Fatal (Failure) | Target contains `yarn.lock`, `pnpm-lock.yaml`, `bun.lock`, or `bun.lockb`. |
-| `UNSUPPORTED_WORKSPACE_LAYOUT` | Fatal (Failure) / Warning | npm workspaces detected in manifest or symlink links in lockfile. |
-| `UNRESOLVED_DEPENDENCY` | Warning | Declared dependency cannot be resolved from the lockfile. |
+| `UNSUPPORTED_WORKSPACE_LAYOUT` | Fatal (Failure) / Warning | Malformed `workspaces` config, workspace pattern escaping project root, empty workspace patterns, unresolvable symlinks, or duplicate workspace package names. |
+| `UNRESOLVED_DEPENDENCY` | Warning | Declared dependency cannot be resolved from the lockfile, or declared workspace range is incompatible with local workspace version. |
 | `SCAN_ERROR` | Fatal (Failure) | Unexpected runtime error during dependency resolution or SBOM generation. |
 
 ---
@@ -199,6 +258,12 @@ interface ScanErrorItem {
 | `no-node-modules-project` | Offline scan | Valid | v3 | `complete` | Resolves completely without physical `node_modules` folder. |
 | `lockfile-v2-project` | Lockfile v2 | Valid | v2 | `complete` | Full support for npm lockfile version 2. |
 | `zero-deps-project` | Edge case | Valid | v3 | `complete` | Zero dependencies; root component only; empty BOM components array. |
+| `workspace-with-lockfile-project` | Workspaces | Valid | v3 | `complete` | Full workspace project with lockfile v3, symlinks, workspace chains, and CycloneDX BOM. |
+| `workspace-simple-project` | Workspaces | Valid | None | `partial` | Single workspace package; root + workspace component discovered. |
+| `workspace-multi-project` | Workspaces | Valid | None | `partial` | Multiple workspaces (apps, packages) with object configuration. |
+| `workspace-overlapping-project` | Workspaces | Valid | None | `partial` | Overlapping workspace patterns deduplicated safely. |
+| `workspace-duplicate-project` | Workspaces | Valid | None | `partial` | Duplicate workspace names report `UNSUPPORTED_WORKSPACE_LAYOUT`. |
+| `workspace-invalid-project` | Workspaces | Valid | None | `partial` | Invalid workspace manifest reports `INVALID_PACKAGE_FILE` while valid package is kept. |
 | `missing-lockfile-project` | Fallback | Valid | None | `partial` | Manifest-only scan; version ranges recorded; `bom: null`. |
 | `unsupported-lockfile-project`| Fallback | Valid | v1 | `partial` | Lockfile v1 detected; emits error code and falls back to partial. |
 | `invalid-lockfile-project` | Fallback | Valid | Malformed | `partial` | Corrupted lockfile JSON falls back to partial scan. |
@@ -208,3 +273,21 @@ interface ScanErrorItem {
 | `invalid-project` | Error | Malformed | None | `failed` | Malformed `package.json` fails with `INVALID_PACKAGE_FILE`. |
 | `unsupported-project` | Error | Valid | `yarn.lock` | `failed` | Yarn detected; fails with `UNSUPPORTED_PACKAGE_MANAGER`. |
 
+---
+
+## 8. Supported Features and Remaining Limitations
+
+### Supported Features
+- Complete npm workspace discovery for array (`["packages/*"]`) and object (`{ "packages": ["packages/*"] }`) declarations.
+- Flexible globbing: `*`, `**`, `?`, pattern negation (`!`), and Windows backslashes (`\`).
+- First-party component tagging: `isFirstParty: true`, `classification: 'first-party'`, `origin: 'first-party'`.
+- Third-party component tagging: `isFirstParty: false`, `classification: 'third-party'`, `origin: 'third-party'`.
+- Lockfile v2/v3 symlink resolution: `link: true` entries map to local workspace components and populate `installPaths`.
+- Full CycloneDX 1.7 JSON SBOM generation for complete workspace scans, with root in `metadata.component` and workspaces in `components`.
+- Complete synchronous (`scanProjectSync`) and asynchronous (`scanProject`) scanner parity.
+
+### Remaining Limitations
+- Non-npm package managers (`yarn`, `pnpm`, `bun`) remain unsupported and trigger `UNSUPPORTED_PACKAGE_MANAGER`.
+- npm lockfile version 1 does not contain full packages tree information and triggers fallback to a partial scan.
+- Workspace projects without `package-lock.json` are scanned in partial mode; exact resolved versions and CycloneDX SBOM generation require a supported lockfile.
+- Incompatible workspace version ranges are not linked as workspace dependencies.

@@ -1,5 +1,5 @@
 export { runEngine, generateSbom, default } from './engine/index.js';
-export { scanProject } from './scanner/index.js';
+export { scanProject, scanProjectSync } from './scanner/index.js';
 export {
   discoverFirstPartyComponents,
   discoverFirstPartyComponentsSync,

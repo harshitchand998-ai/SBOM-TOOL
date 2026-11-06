@@ -1,4 +1,5 @@
 import { ErrorCodes, createScanError } from './errors.js';
+import { isVersionCompatible } from './workspaceDiscovery.js';
 
 /**
  * Extracts the package name from a lockfile key.
@@ -57,6 +58,7 @@ function resolvePackageKey(parentKey, depName, packages) {
  * @param {object} options.rootOptDeps - Root optionalDependencies.
  * @param {object} options.rootPeerDeps - Root peerDependencies.
  * @param {string} options.rootName - Root project name.
+ * @param {Array<object>} [options.workspaces=[]] - Discovered workspace components.
  * @returns {{ dependencyEdges: Map<string, Set<string>>, warnings: object[] }}
  */
 export function buildDependencyGraph({
@@ -69,6 +71,7 @@ export function buildDependencyGraph({
   rootOptDeps,
   rootPeerDeps,
   rootName,
+  workspaces = [],
 }) {
   const warnings = [];
   const dependencyEdges = new Map();
@@ -94,9 +97,29 @@ export function buildDependencyGraph({
       }
 
       for (const depName of Object.keys(allRootDeps)) {
+        const declaredRange = allRootDeps[depName] || '*';
         const resolvedKey = resolvePackageKey(lockKey, depName, packages);
         if (resolvedKey && keyToBomRef.has(resolvedKey)) {
-          dependencyEdges.get(rootRef).add(keyToBomRef.get(resolvedKey));
+          const targetBomRef = keyToBomRef.get(resolvedKey);
+          const targetComp = components.get(targetBomRef);
+          if (targetComp && (targetComp.dependencyType === 'workspace' || targetComp.isFirstParty)) {
+            if (isVersionCompatible(targetComp.version, declaredRange)) {
+              dependencyEdges.get(rootRef).add(targetBomRef);
+            } else {
+              warnings.push(createScanError(
+                ErrorCodes.UNRESOLVED_DEPENDENCY,
+                `Root project declared dependency "${depName}" with range "${declaredRange}", which is incompatible with local workspace version "${targetComp.version}". Not linked as workspace dependency.`,
+                {
+                  workspace: rootName,
+                  dependency: depName,
+                  declaredRange,
+                  localVersion: targetComp.version,
+                }
+              ));
+            }
+          } else {
+            dependencyEdges.get(rootRef).add(targetBomRef);
+          }
         } else {
           const isOptional = rootOptDeps[depName] !== undefined;
           const isPeer = rootPeerDeps[depName] !== undefined && !rootDeps[depName] && !rootDevDeps[depName];
@@ -128,9 +151,17 @@ export function buildDependencyGraph({
     if (!keyToBomRef.has(lockKey)) continue;
 
     const parentBomRef = keyToBomRef.get(lockKey);
+    const parentComp = components.get(parentBomRef);
+    const isWorkspaceParent = parentComp?.dependencyType === 'workspace';
+
     const entryDeps = {
       ...(pkgEntry.dependencies || {}),
       ...(pkgEntry.optionalDependencies || {}),
+      ...(isWorkspaceParent ? {
+        ...(parentComp.dependencies || {}),
+        ...(parentComp.devDependencies || {}),
+        ...(parentComp.optionalDependencies || {}),
+      } : {}),
     };
 
     if (pkgEntry.peerDependencies) {
@@ -153,16 +184,96 @@ export function buildDependencyGraph({
     }
 
     for (const depName of Object.keys(entryDeps)) {
+      const declaredRange = entryDeps[depName] || '*';
       const resolvedKey = resolvePackageKey(lockKey, depName, packages);
       if (resolvedKey && keyToBomRef.has(resolvedKey)) {
-        dependencyEdges.get(parentBomRef).add(keyToBomRef.get(resolvedKey));
+        const targetBomRef = keyToBomRef.get(resolvedKey);
+        const targetComp = components.get(targetBomRef);
+        if (targetComp && (targetComp.dependencyType === 'workspace' || targetComp.isFirstParty)) {
+          if (isVersionCompatible(targetComp.version, declaredRange)) {
+            dependencyEdges.get(parentBomRef).add(targetBomRef);
+          } else {
+            warnings.push(createScanError(
+              ErrorCodes.UNRESOLVED_DEPENDENCY,
+              `Workspace "${parentComp.name}" declared dependency "${depName}" with range "${declaredRange}", which is incompatible with local workspace version "${targetComp.version}". Not linked as workspace dependency.`,
+              {
+                workspace: parentComp.name,
+                dependency: depName,
+                declaredRange,
+                localVersion: targetComp.version,
+              }
+            ));
+          }
+        } else {
+          dependencyEdges.get(parentBomRef).add(targetBomRef);
+        }
       } else {
-        const isOptionalDep = pkgEntry.optionalDependencies && pkgEntry.optionalDependencies[depName];
-        if (!isOptionalDep) {
+        if (isWorkspaceParent) {
           warnings.push(createScanError(
             ErrorCodes.UNRESOLVED_DEPENDENCY,
-            `Dependency "${depName}" required by "${extractPackageName(lockKey)}" could not be resolved from the lockfile.`,
-            { dependency: depName, parent: extractPackageName(lockKey) }
+            `Workspace dependency "${depName}" declared by "${parentComp.name}" could not be resolved from the lockfile.`,
+            { dependency: depName, parent: parentComp.name }
+          ));
+        } else {
+          const isOptionalDep = pkgEntry.optionalDependencies && pkgEntry.optionalDependencies[depName];
+          if (!isOptionalDep) {
+            warnings.push(createScanError(
+              ErrorCodes.UNRESOLVED_DEPENDENCY,
+              `Dependency "${depName}" required by "${extractPackageName(lockKey)}" could not be resolved from the lockfile.`,
+              { dependency: depName, parent: extractPackageName(lockKey) }
+            ));
+          }
+        }
+      }
+    }
+  }
+
+  // Handle any workspaces that were not indexed directly as lockfile package entries
+  const processedParentRefs = new Set();
+  for (const [lockKey] of Object.entries(packages)) {
+    if (keyToBomRef.has(lockKey)) {
+      processedParentRefs.add(keyToBomRef.get(lockKey));
+    }
+  }
+
+  for (const ws of workspaces) {
+    if (!processedParentRefs.has(ws.bomRef)) {
+      const parentBomRef = ws.bomRef;
+      const wsAllDeps = {
+        ...(ws.dependencies || {}),
+        ...(ws.devDependencies || {}),
+        ...(ws.optionalDependencies || {}),
+      };
+
+      for (const [depName, declaredRange] of Object.entries(wsAllDeps)) {
+        const searchBase = ws.location?.relative || ws.relativePath || '';
+        const resolvedKey = resolvePackageKey(searchBase, depName, packages);
+        if (resolvedKey && keyToBomRef.has(resolvedKey)) {
+          const targetBomRef = keyToBomRef.get(resolvedKey);
+          const targetComp = components.get(targetBomRef);
+          if (targetComp && (targetComp.dependencyType === 'workspace' || targetComp.isFirstParty)) {
+            if (isVersionCompatible(targetComp.version, declaredRange)) {
+              dependencyEdges.get(parentBomRef).add(targetBomRef);
+            } else {
+              warnings.push(createScanError(
+                ErrorCodes.UNRESOLVED_DEPENDENCY,
+                `Workspace "${ws.name}" declared dependency "${depName}" with range "${declaredRange}", which is incompatible with local workspace version "${targetComp.version}". Not linked as workspace dependency.`,
+                {
+                  workspace: ws.name,
+                  dependency: depName,
+                  declaredRange,
+                  localVersion: targetComp.version,
+                }
+              ));
+            }
+          } else {
+            dependencyEdges.get(parentBomRef).add(targetBomRef);
+          }
+        } else {
+          warnings.push(createScanError(
+            ErrorCodes.UNRESOLVED_DEPENDENCY,
+            `Workspace dependency "${depName}" declared by "${ws.name}" could not be resolved from the lockfile.`,
+            { dependency: depName, parent: ws.name }
           ));
         }
       }

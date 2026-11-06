@@ -333,10 +333,11 @@ function matchSegments(
   }
 
   // Prevent circular traversal
-  if (visitedPaths.has(realCurrent)) {
+  const visitedKey = `${realCurrent}:${segmentIndex}`;
+  if (visitedPaths.has(visitedKey)) {
     return;
   }
-  visitedPaths.add(realCurrent);
+  visitedPaths.add(visitedKey);
 
   const segment = parts[segmentIndex];
 
@@ -352,8 +353,12 @@ function matchSegments(
       true
     );
 
-    // If currentDir itself has a package.json and is not projectRoot, it's also a candidate
-    if (currentDir !== projectRoot && fs.existsSync(path.join(currentDir, 'package.json'))) {
+    // If ** is the terminal segment, and currentDir itself has a package.json and is not projectRoot, it's also a candidate
+    if (
+      segmentIndex + 1 >= parts.length &&
+      currentDir !== projectRoot &&
+      fs.existsSync(path.join(currentDir, 'package.json'))
+    ) {
       matchedDirs.push(currentDir);
     }
 
@@ -457,9 +462,10 @@ function resolveWorkspaceDirectories(projectRoot, patterns, canonicalRoot = proj
   const negativePatterns = [];
 
   for (const rawPattern of patterns) {
-    const trimmed = rawPattern.trim();
+    if (typeof rawPattern !== 'string') continue;
+    const trimmed = normalizePath(rawPattern.trim());
     if (patternEscapesRoot(projectRoot, trimmed, canonicalRoot)) {
-      escapingPatterns.push(trimmed);
+      escapingPatterns.push(rawPattern.trim());
       continue;
     }
     if (trimmed.startsWith('!')) {
@@ -470,7 +476,7 @@ function resolveWorkspaceDirectories(projectRoot, patterns, canonicalRoot = proj
   }
 
   for (const rawPattern of positivePatterns) {
-    let clean = rawPattern.trim();
+    let clean = normalizePath(rawPattern.trim());
     if (clean.startsWith('./')) clean = clean.substring(2);
     while (clean.endsWith('/')) clean = clean.substring(0, clean.length - 1);
 
@@ -917,7 +923,7 @@ export function discoverFirstPartyComponentsSync(projectPath, options = {}) {
       for (const emptyPattern of emptyPatterns) {
         warnings.push(
           createScanError(
-            ErrorCodes.UNRESOLVED_DEPENDENCY,
+            ErrorCodes.UNSUPPORTED_WORKSPACE_LAYOUT,
             `Workspace pattern "${emptyPattern}" matched no packages.`,
             { pattern: emptyPattern }
           )
@@ -1044,9 +1050,12 @@ export function discoverFirstPartyComponentsSync(projectPath, options = {}) {
   // 4. Resolve workspace dependency relationships
   // Create mapping of workspace name -> workspace component
   const workspaceMap = new Map();
+  const duplicateWorkspaceNames = new Set();
   for (const ws of workspaces) {
     if (!workspaceMap.has(ws.name)) {
       workspaceMap.set(ws.name, ws);
+    } else {
+      duplicateWorkspaceNames.add(ws.name);
     }
   }
 
@@ -1054,7 +1063,9 @@ export function discoverFirstPartyComponentsSync(projectPath, options = {}) {
   const nameToBomRef = new Map();
   nameToBomRef.set(rootComponent.name, rootComponent.bomRef);
   for (const ws of workspaces) {
-    nameToBomRef.set(ws.name, ws.bomRef);
+    if (!nameToBomRef.has(ws.name)) {
+      nameToBomRef.set(ws.name, ws.bomRef);
+    }
   }
 
   // Helper to extract declared range from component's dependency groups
@@ -1077,6 +1088,19 @@ export function discoverFirstPartyComponentsSync(projectPath, options = {}) {
   ]);
   const rootWsDeps = [];
   for (const depName of rootAllDeps) {
+    if (duplicateWorkspaceNames.has(depName)) {
+      warnings.push(
+        createScanError(
+          ErrorCodes.UNSUPPORTED_WORKSPACE_LAYOUT,
+          `Dependency "${depName}" declared by "${rootComponent.name}" cannot be resolved because multiple local workspaces share this package name. Relationship is ambiguous and skipped.`,
+          {
+            workspace: rootComponent.name,
+            dependency: depName,
+          }
+        )
+      );
+      continue;
+    }
     if (workspaceMap.has(depName)) {
       const targetWs = workspaceMap.get(depName);
       const declaredRange = getDeclaredRange(rootComponent, depName);
@@ -1110,6 +1134,19 @@ export function discoverFirstPartyComponentsSync(projectPath, options = {}) {
     ]);
     const matchedDeps = [];
     for (const depName of wsAllDeps) {
+      if (duplicateWorkspaceNames.has(depName)) {
+        warnings.push(
+          createScanError(
+            ErrorCodes.UNSUPPORTED_WORKSPACE_LAYOUT,
+            `Dependency "${depName}" declared by "${ws.name}" cannot be resolved because multiple local workspaces share this package name. Relationship is ambiguous and skipped.`,
+            {
+              workspace: ws.name,
+              dependency: depName,
+            }
+          )
+        );
+        continue;
+      }
       if (workspaceMap.has(depName)) {
         const targetWs = workspaceMap.get(depName);
         const declaredRange = getDeclaredRange(ws, depName);
