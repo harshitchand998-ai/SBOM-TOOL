@@ -1,0 +1,12 @@
+{
+  "name": "workspace-with-lockfile-project",
+  "version": "1.0.0",
+  "description": "Workspace project with complete lockfile v3",
+  "workspaces": [
+    "packages/*"
+  ],
+  "dependencies": {
+    "pkg-a": "^1.0.0"
+  }
+}
+
