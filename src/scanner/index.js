@@ -2,17 +2,17 @@ import { discoverProjectFiles } from '../fileDiscovery.js';
 import { parsePackageJson, parsePackageLock } from '../parser.js';
 import { resolveDependencies, resolveManifestOnly } from '../dependencyResolver.js';
 import { generateCycloneDX } from '../cyclonedxGenerator.js';
+import { discoverFirstPartyComponentsSync } from '../workspaceDiscovery.js';
 import { ScanStatus, ErrorCodes, createScanError } from '../errors.js';
 
 /**
- * The main scanner entry point. Scans a project directory and produces
- * a structured scan result with components, dependency edges, and
- * optionally a CycloneDX SBOM.
+ * Synchronously scans a project directory and produces a structured scan result
+ * with components, dependency edges, and optionally a CycloneDX SBOM.
  *
  * @param {string} projectPath - Path to the project directory.
- * @returns {Promise<object>} Scan result containing status, components, errors, warnings, and BOM.
+ * @returns {object} Scan result containing status, components, errors, warnings, and BOM.
  */
-export async function scanProject(projectPath) {
+export function scanProjectSync(projectPath) {
   const errors = [];
   const warnings = [];
 
@@ -68,7 +68,12 @@ export async function scanProject(projectPath) {
     };
   }
 
-  // Step 3: Parse package-lock.json (if present)
+  // Step 3: Discover first-party components (root application and local workspaces)
+  const fpResult = discoverFirstPartyComponentsSync(discovery.resolvedPath);
+  errors.push(...fpResult.errors);
+  warnings.push(...fpResult.warnings);
+
+  // Step 4: Parse package-lock.json (if present)
   let lockfileResult = null;
   let detectedLockfileVersion = null;
   if (discovery.packageLockPath) {
@@ -83,16 +88,24 @@ export async function scanProject(projectPath) {
     }
   }
 
-  // Step 4: Resolve dependencies
+  // Step 5: Resolve dependencies
   let resolution;
   let status;
+
+  const resolutionOptions = {
+    workspaces: fpResult.workspaces,
+    rootComponent: fpResult.root,
+    workspaceDependencies: fpResult.workspaceDependencies,
+    projectPath: discovery.resolvedPath,
+  };
 
   if (lockfileResult && lockfileResult.data) {
     // Full scan with lockfile
     try {
-      resolution = resolveDependencies(pkgJsonResult.data, lockfileResult.data);
+      resolution = resolveDependencies(pkgJsonResult.data, lockfileResult.data, resolutionOptions);
       warnings.push(...resolution.warnings);
-      status = ScanStatus.COMPLETE;
+      // Status is COMPLETE unless there are non-fatal workspace/discovery errors
+      status = errors.length > 0 ? ScanStatus.PARTIAL : ScanStatus.COMPLETE;
     } catch (err) {
       errors.push(createScanError(
         ErrorCodes.SCAN_ERROR,
@@ -116,12 +129,12 @@ export async function scanProject(projectPath) {
     }
   } else {
     // Partial scan — manifest only
-    resolution = resolveManifestOnly(pkgJsonResult.data);
+    resolution = resolveManifestOnly(pkgJsonResult.data, resolutionOptions);
     warnings.push(...resolution.warnings);
     status = ScanStatus.PARTIAL;
   }
 
-  // Step 5: Convert internal representation for output
+  // Step 6: Convert internal representation for output
   const componentsArray = [];
   for (const [, comp] of resolution.components) {
     componentsArray.push({ ...comp });
@@ -132,7 +145,7 @@ export async function scanProject(projectPath) {
     edgesObject[ref] = [...deps];
   }
 
-  // Step 6: Generate CycloneDX BOM (only for complete scans)
+  // Step 7: Generate CycloneDX BOM (only for complete scans)
   let bom = null;
   if (status === ScanStatus.COMPLETE) {
     try {
@@ -167,3 +180,16 @@ export async function scanProject(projectPath) {
     bom,
   };
 }
+
+/**
+ * Asynchronously scans a project directory and produces a structured scan result
+ * with components, dependency edges, and optionally a CycloneDX SBOM.
+ *
+ * @param {string} projectPath - Path to the project directory.
+ * @returns {Promise<object>} Scan result containing status, components, errors, warnings, and BOM.
+ */
+export async function scanProject(projectPath) {
+  return scanProjectSync(projectPath);
+}
+
+export default scanProject;
