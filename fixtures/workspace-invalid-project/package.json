@@ -1,0 +1,9 @@
+{
+  "name": "workspace-invalid-project",
+  "version": "1.0.0",
+  "description": "Project with invalid workspace directories",
+  "workspaces": [
+    "packages/*"
+  ]
+}
+

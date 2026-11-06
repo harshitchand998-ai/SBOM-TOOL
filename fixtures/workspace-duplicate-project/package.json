@@ -1,0 +1,10 @@
+{
+  "name": "workspace-duplicate-project",
+  "version": "1.0.0",
+  "description": "Project with duplicate workspace package names",
+  "workspaces": [
+    "packages/*",
+    "modules/*"
+  ]
+}
+

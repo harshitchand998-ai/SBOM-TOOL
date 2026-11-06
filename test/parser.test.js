@@ -54,9 +54,11 @@ describe('parsePackageJson', () => {
   });
 
   it('detects workspace configurations', () => {
-    // Create a temporary in-memory test by constructing a path that doesn't exist
-    // Instead, we write and test inline — use a real fixture approach.
-    // We'll skip this test with a workspace fixture — already tested by scanner.test.js
+    const filePath = path.join(fixturesDir, 'workspace-simple-project', 'package.json');
+    const result = parsePackageJson(filePath);
+
+    assert.equal(result.errors.length, 0);
+    assert.deepEqual(result.data.workspaces, ['packages/*']);
   });
 
   it('extracts empty dependency groups when not present', () => {

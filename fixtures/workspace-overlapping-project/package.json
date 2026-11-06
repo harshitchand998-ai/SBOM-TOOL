@@ -1,0 +1,10 @@
+{
+  "name": "workspace-overlapping-project",
+  "version": "1.0.0",
+  "description": "Project with overlapping workspace patterns",
+  "workspaces": [
+    "packages/*",
+    "packages/pkg-a"
+  ]
+}
+
