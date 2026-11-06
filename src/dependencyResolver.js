@@ -1,5 +1,16 @@
 import { ErrorCodes, createScanError } from './errors.js';
 import { buildDependencyGraph } from './dependencyGraph.js';
+import { classifyComponent, isVersionCompatible } from './workspaceDiscovery.js';
+
+/**
+ * Normalizes a file path to use forward slashes regardless of platform.
+ *
+ * @param {string} p - File path to normalize.
+ * @returns {string} Path with forward slashes.
+ */
+function normalizePath(p) {
+  return p.replace(/\\/g, '/');
+}
 
 /**
  * Extracts the package name from a lockfile key (e.g., "node_modules/express" → "express",
@@ -10,8 +21,6 @@ import { buildDependencyGraph } from './dependencyGraph.js';
  * @returns {string} The extracted package name.
  */
 function extractPackageName(lockfileKey) {
-  // The package name is after the last "node_modules/" segment.
-  // For scoped packages: node_modules/@scope/name → @scope/name
   const nodeModulesPrefix = 'node_modules/';
   const lastIndex = lockfileKey.lastIndexOf(nodeModulesPrefix);
   if (lastIndex === -1) return lockfileKey;
@@ -23,13 +32,17 @@ function extractPackageName(lockfileKey) {
  *
  * This function builds a dependency graph by:
  * 1. Enumerating all resolved packages from the lockfile's packages section.
- * 2. Classifying each package as direct or transitive based on the root project's declarations.
- * 3. Resolving each package's own dependencies to the correct installed version.
- * 4. Handling nested node_modules paths for version conflicts.
- * 5. Tracking dependency groups (dependencies, devDependencies, optionalDependencies, peerDependencies).
+ * 2. Incorporating discovered first-party workspaces and handling workspace links (link: true).
+ * 3. Classifying each package as direct or transitive based on the root project's declarations.
+ * 4. Resolving each package's own dependencies to the correct installed version.
+ * 5. Handling nested node_modules paths for version conflicts.
+ * 6. Tracking dependency groups (dependencies, devDependencies, optionalDependencies, peerDependencies).
  *
  * @param {object} packageJsonData - Parsed package.json data from parser.js.
  * @param {object} lockfileData - Parsed package-lock.json data from parser.js.
+ * @param {object} [options={}] - Optional configuration including discovered workspaces.
+ * @param {Array<object>} [options.workspaces=[]] - Discovered workspace components.
+ * @param {object} [options.rootComponent=null] - Discovered root component.
  * @returns {{
  *   components: Map<string, object>,
  *   dependencyEdges: Map<string, Set<string>>,
@@ -37,7 +50,7 @@ function extractPackageName(lockfileKey) {
  *   warnings: Array<object>
  * }}
  */
-export function resolveDependencies(packageJsonData, lockfileData) {
+export function resolveDependencies(packageJsonData, lockfileData, options = {}) {
   const warnings = [];
   const packages = lockfileData.packages;
 
@@ -70,10 +83,13 @@ export function resolveDependencies(packageJsonData, lockfileData) {
   const components = new Map();
 
   // Root application component
-  const rootRef = `pkg:npm/${encodePackageName(packageJsonData.name)}@${packageJsonData.version}`;
-  components.set(rootRef, {
+  const rootComp = options.rootComponent;
+  const rootRef = rootComp?.bomRef || `pkg:npm/${encodePackageName(packageJsonData.name)}@${packageJsonData.version}`;
+  const rootComponentData = {
     name: packageJsonData.name,
     version: packageJsonData.version,
+    description: packageJsonData.description || rootComp?.description || '',
+    license: packageJsonData.license || rootComp?.license || '',
     ecosystem: 'npm',
     purl: rootRef,
     bomRef: rootRef,
@@ -86,7 +102,52 @@ export function resolveDependencies(packageJsonData, lockfileData) {
     dev: false,
     devOptional: false,
     isRoot: true,
-  });
+    isFirstParty: true,
+    classification: 'first-party',
+    origin: 'first-party',
+    location: rootComp?.location || { resolved: '', relative: '.' },
+    path: rootComp?.path || '',
+    relativePath: '.',
+  };
+  components.set(rootRef, rootComponentData);
+
+  // Setup discovered workspaces
+  const workspaces = options.workspaces || [];
+  const workspaceByPath = new Map();
+  const workspaceByName = new Map();
+  const workspaceNames = new Set();
+
+  for (const ws of workspaces) {
+    const wsRef = ws.bomRef;
+    const wsComp = {
+      ...ws,
+      ecosystem: 'npm',
+      dependencyGroups: directDependencyGroups.get(ws.name) ? [...directDependencyGroups.get(ws.name)] : [],
+      integrity: null,
+      resolved: null,
+      installPaths: [],
+      optional: false,
+      dev: false,
+      devOptional: false,
+      isRoot: false,
+      isFirstParty: true,
+      classification: 'first-party',
+      origin: 'first-party',
+      dependencyType: 'workspace',
+    };
+    components.set(wsRef, wsComp);
+
+    workspaceNames.add(ws.name);
+    if (!workspaceByName.has(ws.name)) {
+      workspaceByName.set(ws.name, wsComp);
+    }
+
+    const rel = normalizePath(ws.location?.relative || ws.relativePath || '');
+    if (rel) {
+      workspaceByPath.set(rel, wsComp);
+      workspaceByPath.set(rel.replace(/^\.\//, ''), wsComp);
+    }
+  }
 
   // Map from lockfile key to bomRef for resolving dependency edges
   const keyToBomRef = new Map();
@@ -96,13 +157,34 @@ export function resolveDependencies(packageJsonData, lockfileData) {
     // Skip the root entry (empty string key)
     if (lockKey === '') continue;
 
-    // Skip link entries (workspace symlinks) — these are unsupported
+    // Check if this lockKey is a discovered workspace package directory
+    const normalizedLockKey = normalizePath(lockKey).replace(/^\.\//, '');
+    if (workspaceByPath.has(normalizedLockKey)) {
+      const wsComp = workspaceByPath.get(normalizedLockKey);
+      keyToBomRef.set(lockKey, wsComp.bomRef);
+      // Workspace package is already added as first-party; do not duplicate as registry component!
+      continue;
+    }
+
+    // Handle workspace symlinks (pkgEntry.link: true)
     if (pkgEntry.link) {
-      warnings.push(createScanError(
-        ErrorCodes.UNSUPPORTED_WORKSPACE_LAYOUT,
-        `Linked package detected and skipped: ${lockKey}. Workspace links are not supported in this version.`,
-        { lockfileKey: lockKey }
-      ));
+      const targetRel = pkgEntry.resolved ? normalizePath(pkgEntry.resolved).replace(/^\.\//, '') : '';
+      let targetWs = workspaceByPath.get(targetRel);
+      if (!targetWs) {
+        const symlinkPkgName = pkgEntry.name || extractPackageName(lockKey);
+        targetWs = workspaceByName.get(symlinkPkgName);
+      }
+
+      if (targetWs) {
+        targetWs.installPaths.push(lockKey);
+        keyToBomRef.set(lockKey, targetWs.bomRef);
+      } else {
+        warnings.push(createScanError(
+          ErrorCodes.UNSUPPORTED_WORKSPACE_LAYOUT,
+          `Linked package detected at "${lockKey}" with target "${pkgEntry.resolved}", which could not be resolved to a known workspace package. Skipping.`,
+          { lockfileKey: lockKey, target: pkgEntry.resolved }
+        ));
+      }
       continue;
     }
 
@@ -119,7 +201,6 @@ export function resolveDependencies(packageJsonData, lockfileData) {
     }
 
     const purl = `pkg:npm/${encodePackageName(name)}@${version}`;
-    // Use the lockfile key to make bom-refs unique for same name+version at different paths
     const bomRef = purl;
 
     // Determine if this is a direct dependency
@@ -131,10 +212,8 @@ export function resolveDependencies(packageJsonData, lockfileData) {
     const integrity = pkgEntry.integrity || null;
     const resolved = pkgEntry.resolved || null;
 
-    // If component with same bomRef already exists (same name+version at different install path),
-    // we just add another keyToBomRef mapping. We deduplicate the component identity.
     if (!components.has(bomRef)) {
-      components.set(bomRef, {
+      const rawComp = {
         name,
         version,
         ecosystem: 'npm',
@@ -148,12 +227,18 @@ export function resolveDependencies(packageJsonData, lockfileData) {
         optional: pkgEntry.optional || false,
         dev: pkgEntry.dev || false,
         devOptional: pkgEntry.devOptional || false,
-      });
+        isFirstParty: false,
+        classification: 'third-party',
+        origin: 'third-party',
+      };
+      components.set(bomRef, classifyComponent(rawComp, {
+        names: workspaceNames,
+        workspaces,
+        firstPartyComponents: [rootComponentData, ...workspaces],
+      }));
     } else {
-      // Same package+version at a different path — add the install path
       const existing = components.get(bomRef);
       existing.installPaths.push(lockKey);
-      // If this path is direct but existing was transitive, upgrade to direct
       if (isDirect && existing.dependencyType === 'transitive') {
         existing.dependencyType = 'direct';
         existing.dependencyGroups = dependencyGroups;
@@ -174,6 +259,7 @@ export function resolveDependencies(packageJsonData, lockfileData) {
     rootOptDeps,
     rootPeerDeps,
     rootName: packageJsonData.name,
+    workspaces,
   });
   const dependencyEdges = graphResult.dependencyEdges;
   warnings.push(...graphResult.warnings);
@@ -182,6 +268,12 @@ export function resolveDependencies(packageJsonData, lockfileData) {
   const directRefs = dependencyEdges.get(rootRef) || new Set();
   for (const [bomRef, comp] of components.entries()) {
     if (comp.isRoot) continue;
+    if (comp.dependencyType === 'workspace') {
+      if (directRefs.has(bomRef)) {
+        comp.dependencyGroups = directDependencyGroups.get(comp.name) || [];
+      }
+      continue;
+    }
     if (directRefs.has(bomRef)) {
       comp.dependencyType = 'direct';
       comp.dependencyGroups = directDependencyGroups.get(comp.name) || [];
@@ -213,6 +305,7 @@ function encodePackageName(name) {
  * (no lockfile). Records version ranges as declarations rather than resolved versions.
  *
  * @param {object} packageJsonData - Parsed package.json data.
+ * @param {object} [options={}] - Optional configuration including discovered workspaces.
  * @returns {{
  *   components: Map<string, object>,
  *   dependencyEdges: Map<string, Set<string>>,
@@ -220,15 +313,18 @@ function encodePackageName(name) {
  *   warnings: Array<object>
  * }}
  */
-export function resolveManifestOnly(packageJsonData) {
+export function resolveManifestOnly(packageJsonData, options = {}) {
   const warnings = [];
   const components = new Map();
   const dependencyEdges = new Map();
 
-  const rootRef = `pkg:npm/${encodePackageName(packageJsonData.name)}@${packageJsonData.version}`;
+  const rootComp = options.rootComponent;
+  const rootRef = rootComp?.bomRef || `pkg:npm/${encodePackageName(packageJsonData.name)}@${packageJsonData.version}`;
   components.set(rootRef, {
     name: packageJsonData.name,
     version: packageJsonData.version,
+    description: packageJsonData.description || rootComp?.description || '',
+    license: packageJsonData.license || rootComp?.license || '',
     ecosystem: 'npm',
     purl: rootRef,
     bomRef: rootRef,
@@ -241,8 +337,40 @@ export function resolveManifestOnly(packageJsonData) {
     dev: false,
     devOptional: false,
     isRoot: true,
+    isFirstParty: true,
+    classification: 'first-party',
+    origin: 'first-party',
+    location: rootComp?.location || { resolved: '', relative: '.' },
+    path: rootComp?.path || '',
+    relativePath: '.',
   });
   dependencyEdges.set(rootRef, new Set());
+
+  const workspaces = options.workspaces || [];
+  const workspaceByName = new Map();
+  for (const ws of workspaces) {
+    const wsComp = {
+      ...ws,
+      ecosystem: 'npm',
+      dependencyGroups: [],
+      integrity: null,
+      resolved: null,
+      installPaths: [],
+      optional: false,
+      dev: false,
+      devOptional: false,
+      isRoot: false,
+      isFirstParty: true,
+      classification: 'first-party',
+      origin: 'first-party',
+      dependencyType: 'workspace',
+    };
+    components.set(ws.bomRef, wsComp);
+    dependencyEdges.set(ws.bomRef, new Set());
+    if (!workspaceByName.has(ws.name)) {
+      workspaceByName.set(ws.name, wsComp);
+    }
+  }
 
   const allGroups = [
     ['dependencies', packageJsonData.dependencies],
@@ -254,6 +382,23 @@ export function resolveManifestOnly(packageJsonData) {
   for (const [groupName, deps] of allGroups) {
     if (!deps) continue;
     for (const [name, versionRange] of Object.entries(deps)) {
+      if (workspaceByName.has(name)) {
+        const ws = workspaceByName.get(name);
+        if (isVersionCompatible(ws.version, versionRange)) {
+          dependencyEdges.get(rootRef).add(ws.bomRef);
+          if (!ws.dependencyGroups.includes(groupName)) {
+            ws.dependencyGroups.push(groupName);
+          }
+        } else {
+          warnings.push(createScanError(
+            ErrorCodes.UNRESOLVED_DEPENDENCY,
+            `Root project declared dependency "${name}" with range "${versionRange}", which is incompatible with local workspace version "${ws.version}". Not linked as workspace dependency.`,
+            { workspace: rootComp?.name || packageJsonData.name, dependency: name, declaredRange: versionRange, localVersion: ws.version }
+          ));
+        }
+        continue;
+      }
+
       const bomRef = `pkg:npm/${encodePackageName(name)}@${versionRange}`;
       if (!components.has(bomRef)) {
         components.set(bomRef, {
@@ -261,7 +406,7 @@ export function resolveManifestOnly(packageJsonData) {
           version: null,
           versionRange,
           ecosystem: 'npm',
-          purl: null, // Cannot produce a valid purl without a resolved version
+          purl: null,
           bomRef,
           dependencyType: 'direct',
           dependencyGroups: [groupName],
@@ -271,6 +416,9 @@ export function resolveManifestOnly(packageJsonData) {
           optional: groupName === 'optionalDependencies',
           dev: groupName === 'devDependencies',
           devOptional: false,
+          isFirstParty: false,
+          classification: 'third-party',
+          origin: 'third-party',
         });
         dependencyEdges.set(bomRef, new Set());
       } else {
@@ -280,6 +428,60 @@ export function resolveManifestOnly(packageJsonData) {
         }
       }
       dependencyEdges.get(rootRef).add(bomRef);
+    }
+  }
+
+  // Workspaces declared dependencies
+  for (const ws of workspaces) {
+    const wsGroups = [
+      ['dependencies', ws.dependencies],
+      ['devDependencies', ws.devDependencies],
+      ['optionalDependencies', ws.optionalDependencies],
+      ['peerDependencies', ws.peerDependencies],
+    ];
+
+    for (const [groupName, deps] of wsGroups) {
+      if (!deps) continue;
+      for (const [name, versionRange] of Object.entries(deps)) {
+        if (workspaceByName.has(name)) {
+          const targetWs = workspaceByName.get(name);
+          if (isVersionCompatible(targetWs.version, versionRange)) {
+            dependencyEdges.get(ws.bomRef).add(targetWs.bomRef);
+          } else {
+            warnings.push(createScanError(
+              ErrorCodes.UNRESOLVED_DEPENDENCY,
+              `Workspace "${ws.name}" declared dependency "${name}" with range "${versionRange}", which is incompatible with local workspace version "${targetWs.version}". Not linked as workspace dependency.`,
+              { workspace: ws.name, dependency: name, declaredRange: versionRange, localVersion: targetWs.version }
+            ));
+          }
+          continue;
+        }
+
+        const bomRef = `pkg:npm/${encodePackageName(name)}@${versionRange}`;
+        if (!components.has(bomRef)) {
+          components.set(bomRef, {
+            name,
+            version: null,
+            versionRange,
+            ecosystem: 'npm',
+            purl: null,
+            bomRef,
+            dependencyType: 'transitive',
+            dependencyGroups: [],
+            integrity: null,
+            resolved: null,
+            installPaths: [],
+            optional: groupName === 'optionalDependencies',
+            dev: groupName === 'devDependencies',
+            devOptional: false,
+            isFirstParty: false,
+            classification: 'third-party',
+            origin: 'third-party',
+          });
+          dependencyEdges.set(bomRef, new Set());
+        }
+        dependencyEdges.get(ws.bomRef).add(bomRef);
+      }
     }
   }
 
