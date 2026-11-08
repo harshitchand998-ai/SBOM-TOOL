@@ -3,14 +3,15 @@ import { parsePackageJson, parsePackageLock } from '../parser.js';
 import { resolveDependencies, resolveManifestOnly } from '../dependencyResolver.js';
 import { generateCycloneDX } from '../cyclonedxGenerator.js';
 import { discoverFirstPartyComponentsSync } from '../workspaceDiscovery.js';
+import { validateStructure } from '../validator.js';
 import { ScanStatus, ErrorCodes, createScanError } from '../errors.js';
 
 /**
  * Synchronously scans a project directory and produces a structured scan result
- * with components, dependency edges, and optionally a CycloneDX SBOM.
+ * with components, dependency edges, CycloneDX SBOM, and validation information.
  *
  * @param {string} projectPath - Path to the project directory.
- * @returns {object} Scan result containing status, components, errors, warnings, and BOM.
+ * @returns {object} Scan result containing status, components, errors, warnings, BOM, and validation.
  */
 export function scanProjectSync(projectPath) {
   const errors = [];
@@ -32,6 +33,7 @@ export function scanProjectSync(projectPath) {
       components: [],
       dependencyEdges: {},
       bom: null,
+      validation: null,
     };
   }
 
@@ -47,6 +49,7 @@ export function scanProjectSync(projectPath) {
       components: [],
       dependencyEdges: {},
       bom: null,
+      validation: null,
     };
   }
 
@@ -65,6 +68,7 @@ export function scanProjectSync(projectPath) {
       components: [],
       dependencyEdges: {},
       bom: null,
+      validation: null,
     };
   }
 
@@ -125,6 +129,7 @@ export function scanProjectSync(projectPath) {
         components: [],
         dependencyEdges: {},
         bom: null,
+        validation: null,
       };
     }
   } else {
@@ -147,6 +152,7 @@ export function scanProjectSync(projectPath) {
 
   // Step 7: Generate CycloneDX BOM (only for complete scans)
   let bom = null;
+  let validation = null;
   if (status === ScanStatus.COMPLETE) {
     try {
       bom = generateCycloneDX({
@@ -155,6 +161,20 @@ export function scanProjectSync(projectPath) {
         dependencyEdges: resolution.dependencyEdges,
         projectMetadata: pkgJsonResult.data,
       });
+
+      // Step 8: Validate generated BOM structurally
+      validation = validateStructure(bom);
+      if (!validation.valid) {
+        for (const valErr of validation.errors) {
+          errors.push(createScanError(
+            ErrorCodes.SCAN_ERROR,
+            `BOM validation error: ${valErr}`,
+            { validationError: valErr }
+          ));
+        }
+        status = ScanStatus.PARTIAL;
+        bom = null; // Do not return an invalid BOM as valid
+      }
     } catch (err) {
       errors.push(createScanError(
         ErrorCodes.SCAN_ERROR,
@@ -162,6 +182,8 @@ export function scanProjectSync(projectPath) {
         { originalError: err.message }
       ));
       status = ScanStatus.PARTIAL;
+      bom = null;
+      validation = null;
     }
   }
 
@@ -178,15 +200,16 @@ export function scanProjectSync(projectPath) {
     components: componentsArray,
     dependencyEdges: edgesObject,
     bom,
+    validation,
   };
 }
 
 /**
  * Asynchronously scans a project directory and produces a structured scan result
- * with components, dependency edges, and optionally a CycloneDX SBOM.
+ * with components, dependency edges, CycloneDX SBOM, and validation information.
  *
  * @param {string} projectPath - Path to the project directory.
- * @returns {Promise<object>} Scan result containing status, components, errors, warnings, and BOM.
+ * @returns {Promise<object>} Scan result containing status, components, errors, warnings, BOM, and validation.
  */
 export async function scanProject(projectPath) {
   return scanProjectSync(projectPath);
