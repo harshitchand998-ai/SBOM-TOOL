@@ -113,8 +113,17 @@ async function main() {
     console.log();
   }
 
+  // Report validation errors if present
+  if (result.validation && !result.validation.valid) {
+    console.error(`BOM validation failed with ${result.validation.errors.length} error(s):`);
+    for (const err of result.validation.errors) {
+      console.error(`  ✗ ${err}`);
+    }
+    console.log();
+  }
+
   // Write output
-  if (result.bom) {
+  if (result.status === 'complete' && result.bom && result.validation?.valid) {
     const resolvedOutput = path.resolve(outputPath);
     const outputDir = path.dirname(resolvedOutput);
     if (!fs.existsSync(outputDir)) {
@@ -123,7 +132,11 @@ async function main() {
     fs.writeFileSync(resolvedOutput, JSON.stringify(result.bom, null, 2), 'utf-8');
     console.log(`CycloneDX SBOM written to: ${resolvedOutput}`);
   } else if (result.status === 'partial') {
-    console.log('Partial scan completed. No CycloneDX SBOM generated (lockfile required for complete scan).');
+    if (result.validation && !result.validation.valid) {
+      console.log('BOM validation failed. No CycloneDX SBOM generated.');
+    } else {
+      console.log('Partial scan completed. No CycloneDX SBOM generated (lockfile required for complete scan).');
+    }
 
     // Write partial result to a JSON report instead
     const partialOutput = outputPath.replace(/\.cdx\.json$/, '.partial.json');
@@ -134,14 +147,16 @@ async function main() {
       warnings: result.warnings,
       errors: result.errors,
       components: result.components,
+      validation: result.validation,
     }, null, 2), 'utf-8');
     console.log(`Partial scan report written to: ${resolvedOutput}`);
   } else {
     console.log('Scan failed. No output generated.');
   }
 
-  // Exit with appropriate code
-  process.exit(result.status === 'failed' ? 1 : 0);
+  // Exit with non-zero if scan failed or if validation failed
+  const hasValidationError = result.validation && !result.validation.valid;
+  process.exit((result.status === 'failed' || hasValidationError) ? 1 : 0);
 }
 
 main().catch(err => {

@@ -15,6 +15,8 @@
     "test:graph": "node --test test/dependencyGraph.test.js",
     "test:workspace": "node --test test/workspaceDiscovery.test.js",
     "test:cyclonedx": "node --test test/cyclonedxGenerator.test.js",
+    "test:validator": "node --test test/validator.test.js",
+    "test:integration": "node --test test/integration.test.js",
     "scan": "node src/cli.js scan",
     "check": "node --check src/index.js src/engine/index.js src/scanner/index.js src/cli.js src/errors.js src/fileDiscovery.js src/parser.js src/dependencyResolver.js src/dependencyGraph.js src/workspaceDiscovery.js src/cyclonedxGenerator.js src/validator.js"
   },

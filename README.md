@@ -12,7 +12,7 @@ A lightweight, reusable JavaScript engine and tool for generating Software Bill 
 │   └── scanner-contract.md    # Formal scanner data contract specification
 ├── fixtures/                  # Comprehensive test fixture projects (workspaces & standalone)
 ├── src/
-│   ├── index.js               # Main package entry point
+│   ├── index.js               # Main package entry point and public API exports
 │   ├── engine/                # Reusable engine core
 │   │   └── index.js           # Decoupled engine entry point
 │   ├── scanner/               # npm dependency scanner orchestration
@@ -23,7 +23,7 @@ A lightweight, reusable JavaScript engine and tool for generating Software Bill 
 │   ├── dependencyGraph.js     # Standalone dependency graph builder and edge resolver
 │   ├── workspaceDiscovery.js  # First-party component discovery and workspace resolution
 │   ├── cyclonedxGenerator.js  # CycloneDX 1.7 JSON SBOM generator
-│   ├── validator.js           # Structural and schema SBOM validation
+│   ├── validator.js           # Structural and schema SBOM validation (validateStructure, validatePurl)
 │   ├── errors.js              # Standard error codes and status enums
 │   └── cli.js                 # Command-line interface
 └── test/
@@ -33,8 +33,9 @@ A lightweight, reusable JavaScript engine and tool for generating Software Bill 
     ├── dependencyGraph.test.js    # Graph builder tests
     ├── workspaceDiscovery.test.js # First-party workspace discovery tests
     ├── cyclonedxGenerator.test.js # SBOM output and graph tests
+    ├── validator.test.js      # Dedicated structural & schema validation tests (49 tests)
     ├── scanner.test.js        # Scanner contract and fixture tests
-    └── integration.test.js    # Comprehensive integration tests (22 scenarios)
+    └── integration.test.js    # Full pipeline and CLI integration tests (37 scenarios)
 ```
 
 ## Prerequisites
@@ -59,6 +60,8 @@ npm install
 - **`npm run test:graph`**: Runs unit tests for standalone dependency graph building.
 - **`npm run test:workspace`**: Runs unit tests for first-party component and workspace discovery.
 - **`npm run test:cyclonedx`**: Runs unit tests for CycloneDX 1.7 SBOM generation and schema validation.
+- **`npm run test:validator`**: Runs unit tests for CycloneDX structural and schema validation.
+- **`npm run test:integration`**: Runs end-to-end pipeline and CLI integration tests.
 - **`npm run scan <path>`**: Runs the CLI scanner against a specified target project path.
 - **`npm run check`**: Runs syntax validation checks across all source files using `node --check`.
 
@@ -77,6 +80,16 @@ npm install
    - Validates declared version ranges with `isVersionCompatible` against local workspace versions.
    - Distinctly classifies first-party workspaces (`isFirstParty: true`, `dependencyType: 'workspace'`) from external registry packages (`isFirstParty: false`, `dependencyType: 'direct' | 'transitive'`).
 
+## CycloneDX SBOM Generation & Structural Validation
+
+`npm-sbom-tool` generates standard **CycloneDX 1.7** JSON Software Bill of Materials (SBOM):
+
+- **Automatic Structural Validation**: Every generated BOM is validated via `validateStructure()` before return. Checks top-level fields, metadata, timestamps, root component, components array, PURL formats, duplicate `bom-ref`s, and dependency edges.
+- **Referential Integrity**: Guarantees no dangling references. Every dependency `ref` and child in `dependsOn` must exist in `metadata.component` or `components`.
+- **Protected Pipeline**: If validation fails, `status` becomes `'partial'`, `bom` is set to `null`, and validation errors are surfaced in `result.validation` and `result.errors`.
+- **Partial Scan Preservation**: When a lockfile is missing or corrupted, `bom: null` and `validation: null` are preserved. The tool never outputs an invalid or fabricated SBOM.
+- **Zero Network Dependency**: Built-in structural validation runs completely offline without network calls. Optional schema validation (`validateAgainstSchema`) is available when callers provide a schema object.
+
 ## Scanner Data Contract
 
 For complete input/output specifications, component schemas, error codes, and fixture mappings, see the [Scanner Contract Specification](docs/scanner-contract.md).
@@ -87,6 +100,10 @@ For complete input/output specifications, component schemas, error codes, and fi
 import {
   scanProject,
   scanProjectSync,
+  generateCycloneDX,
+  validateStructure,
+  validateAgainstSchema,
+  validatePurl,
   runEngine,
   discoverFirstPartyComponents,
 } from "npm-sbom-tool";
@@ -99,23 +116,33 @@ console.log(result.projectMetadata);  // { name: 'workspace-with-lockfile-projec
 console.log(result.components);       // Array of discovered components (root + workspaces + dependencies)
 console.log(result.dependencyEdges);  // Adjacency list mapping bomRef -> [child bomRefs]
 console.log(result.bom);              // CycloneDX 1.7 JSON SBOM object (or null for partial/failed)
+console.log(result.validation);       // { valid: true, errors: [], warnings: [] } (or null if no BOM)
 
 // 2. Synchronously scan an npm project (guaranteed identical result)
 const syncResult = scanProjectSync("./fixtures/simple-project");
 console.log(syncResult.status);       // 'complete'
+console.log(syncResult.validation.valid); // true
 
-// 3. Standalone first-party component discovery
-const fp = await discoverFirstPartyComponents("./fixtures/workspace-simple-project");
-console.log(fp.root);                 // Root component
-console.log(fp.workspaces);           // Discovered workspace components
+// 3. Standalone structural validation of any CycloneDX BOM
+const validation = validateStructure(result.bom);
+console.log(validation.valid);        // true
+console.log(validation.errors);       // []
+
+// 4. Standalone PURL validation
+const purlCheck = validatePurl("pkg:npm/%40babel/core@7.24.0");
+console.log(purlCheck.valid);         // true
 ```
 
 ## Command-Line Usage
 
 ```bash
-# Scan a project and display output
-npm run scan fixtures/workspace-with-lockfile-project
+# Scan a project and write CycloneDX SBOM
+node src/cli.js scan fixtures/workspace-with-lockfile-project --output ./bom.cdx.json
 
-# Scan with CLI directly
-node src/cli.js scan fixtures/simple-project --output ./bom.cdx.json
+# Scan a simple project (default output: ./sbom-output.cdx.json)
+node src/cli.js scan fixtures/simple-project
+
+# When scanning a partial project (missing lockfile), a diagnostic report is written instead:
+node src/cli.js scan fixtures/missing-lockfile-project --output ./bom.cdx.json
+# Writes: ./bom.partial.json (exits 0)
 ```
