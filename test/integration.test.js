@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { scanProject, scanProjectSync } from '../src/scanner/index.js';
@@ -571,6 +572,310 @@ describe('Order 7: Dependency Graph and First-Party Discovery Integration', () =
         assert.equal(syncResult.bom.components.length, asyncResult.bom.components.length);
         assert.equal(syncResult.bom.dependencies.length, asyncResult.bom.dependencies.length);
       }
+    }
+  });
+});
+
+describe('Order 9 & 10: Validated CycloneDX SBOM Pipeline Integration', () => {
+  const cliScriptPath = path.join(__dirname, '..', 'src', 'cli.js');
+
+  // Scenario 1: Normal npm project generates a valid CycloneDX BOM
+  it('1. Normal npm project generates a valid CycloneDX BOM', async () => {
+    const fixturePath = path.join(fixturesDir, 'simple-project');
+    const result = await scanProject(fixturePath);
+
+    assert.equal(result.status, ScanStatus.COMPLETE);
+    assert.equal(result.errors.length, 0);
+    assert.ok(result.bom, 'BOM must be generated');
+    assert.equal(result.bom.bomFormat, 'CycloneDX');
+    assert.equal(result.bom.specVersion, '1.7');
+
+    assert.ok(result.validation, 'Validation object must be present');
+    assert.equal(result.validation.valid, true);
+    assert.deepEqual(result.validation.errors, []);
+  });
+
+  // Scenario 2: Project with third-party dependencies generates a valid BOM
+  it('2. Project with third-party dependencies generates a valid BOM', async () => {
+    const fixturePath = path.join(fixturesDir, 'transitive-project');
+    const result = await scanProject(fixturePath);
+
+    assert.equal(result.status, ScanStatus.COMPLETE);
+    assert.ok(result.bom);
+    assert.ok(result.validation);
+    assert.equal(result.validation.valid, true);
+    assert.equal(result.bom.components.length, 4);
+
+    // Verify all components exist in dependencies
+    const depRefs = new Set(result.bom.dependencies.map(d => d.ref));
+    for (const comp of result.bom.components) {
+      assert.ok(depRefs.has(comp['bom-ref']), `Component ${comp.name} must be in dependencies`);
+    }
+  });
+
+  // Scenario 3: Project with first-party workspaces generates a valid BOM
+  it('3. Project with first-party workspaces generates a valid BOM', async () => {
+    const fixturePath = path.join(fixturesDir, 'workspace-with-lockfile-project');
+    const result = await scanProject(fixturePath);
+
+    assert.equal(result.status, ScanStatus.COMPLETE);
+    assert.ok(result.bom);
+    assert.ok(result.validation);
+    assert.equal(result.validation.valid, true);
+
+    // Verify workspace components exist in BOM components
+    const wsNames = result.bom.components.map(c => c.name);
+    assert.ok(wsNames.includes('pkg-a'));
+    assert.ok(wsNames.includes('pkg-b'));
+  });
+
+  // Scenario 4: Nested workspace relationships are preserved
+  it('4. Nested workspace relationships are preserved in BOM dependency graph', async () => {
+    const fixturePath = path.join(fixturesDir, 'workspace-with-lockfile-project');
+    const result = await scanProject(fixturePath);
+
+    assert.equal(result.status, ScanStatus.COMPLETE);
+    assert.ok(result.bom);
+
+    // pkg-a depends on pkg-b
+    const pkgADep = result.bom.dependencies.find(d => d.ref.includes('pkg-a'));
+    assert.ok(pkgADep, 'pkg-a dependency entry must exist');
+    assert.ok(
+      pkgADep.dependsOn.some(child => child.includes('pkg-b')),
+      'pkg-a must have pkg-b in dependsOn'
+    );
+  });
+
+  // Scenario 5: Multiple versions of the same package remain distinct
+  it('5. Multiple versions of the same package remain distinct in BOM and validation passes', async () => {
+    const fixturePath = path.join(fixturesDir, 'multiple-versions-project');
+    const result = await scanProject(fixturePath);
+
+    assert.equal(result.status, ScanStatus.COMPLETE);
+    assert.ok(result.bom);
+    assert.ok(result.validation);
+    assert.equal(result.validation.valid, true);
+
+    const sharedComps = result.bom.components.filter(c => c.name === 'shared-dep');
+    assert.equal(sharedComps.length, 2);
+    const bomRefs = sharedComps.map(c => c['bom-ref']);
+    assert.notEqual(bomRefs[0], bomRefs[1], 'Different versions must have distinct bom-refs');
+  });
+
+  // Scenario 6: Dependency graph references are valid
+  it('6. Dependency graph references are valid across multiple project fixtures', async () => {
+    const testFixtures = [
+      'simple-project',
+      'transitive-project',
+      'workspace-with-lockfile-project',
+      'scoped-package-project',
+    ];
+
+    for (const fixtureName of testFixtures) {
+      const fixturePath = path.join(fixturesDir, fixtureName);
+      const result = await scanProject(fixturePath);
+
+      assert.equal(result.status, ScanStatus.COMPLETE);
+      assert.ok(result.bom);
+
+      const allRefs = new Set([
+        result.bom.metadata.component['bom-ref'],
+        ...result.bom.components.map(c => c['bom-ref']),
+      ]);
+
+      for (const dep of result.bom.dependencies) {
+        assert.ok(allRefs.has(dep.ref), `dep.ref "${dep.ref}" must exist in BOM`);
+        for (const childRef of dep.dependsOn) {
+          assert.ok(allRefs.has(childRef), `childRef "${childRef}" must exist in BOM`);
+        }
+      }
+    }
+  });
+
+  // Scenario 7: Empty projects follow the existing supported behavior
+  it('7. Empty / zero-dependency projects generate valid CycloneDX BOM', async () => {
+    const fixturePath = path.join(fixturesDir, 'zero-deps-project');
+    const result = await scanProject(fixturePath);
+
+    assert.equal(result.status, ScanStatus.COMPLETE);
+    assert.ok(result.bom);
+    assert.ok(result.validation);
+    assert.equal(result.validation.valid, true);
+    assert.equal(result.bom.components.length, 0);
+    assert.equal(result.bom.dependencies.length, 1);
+    assert.equal(result.bom.dependencies[0].ref, result.bom.metadata.component['bom-ref']);
+    assert.deepEqual(result.bom.dependencies[0].dependsOn, []);
+  });
+
+  // Scenario 8: Partial scans preserve bom: null
+  it('8. Partial scans preserve bom: null and validation: null', async () => {
+    const partialFixtures = [
+      'missing-lockfile-project',
+      'invalid-lockfile-project',
+      'unsupported-lockfile-project',
+    ];
+
+    for (const fixtureName of partialFixtures) {
+      const fixturePath = path.join(fixturesDir, fixtureName);
+      const result = await scanProject(fixturePath);
+
+      assert.equal(result.status, ScanStatus.PARTIAL);
+      assert.equal(result.bom, null);
+      assert.equal(result.validation, null);
+    }
+  });
+
+  // Scenario 9: Partial scans do not attempt to write BOM output
+  it('9. Partial scans do not attempt to write CycloneDX BOM output via CLI', () => {
+    const fixturePath = path.join(fixturesDir, 'missing-lockfile-project');
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sbom-test-cli-partial-'));
+    const targetCdx = path.join(tmpDir, 'output.cdx.json');
+    const expectedPartial = path.join(tmpDir, 'output.partial.json');
+
+    try {
+      execFileSync(process.execPath, [cliScriptPath, 'scan', fixturePath, '--output', targetCdx], {
+        encoding: 'utf8',
+      });
+
+      assert.equal(fs.existsSync(targetCdx), false, 'CycloneDX BOM must NOT be written on partial scan');
+      assert.equal(fs.existsSync(expectedPartial), true, 'Partial JSON report must be written');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // Scenario 10: Sync and async scanner results have equivalent validation outcomes
+  it('10. Sync and async scanner results produce identical validation outcomes', async () => {
+    const testFixtures = [
+      'simple-project',
+      'transitive-project',
+      'workspace-with-lockfile-project',
+      'zero-deps-project',
+      'missing-lockfile-project',
+    ];
+
+    for (const fixtureName of testFixtures) {
+      const fixturePath = path.join(fixturesDir, fixtureName);
+      const syncResult = scanProjectSync(fixturePath);
+      const asyncResult = await scanProject(fixturePath);
+
+      assert.equal(syncResult.status, asyncResult.status);
+      assert.deepEqual(syncResult.validation, asyncResult.validation);
+      assert.equal(syncResult.bom !== null, asyncResult.bom !== null);
+    }
+  });
+
+  // Scenario 11: Invalid generated BOMs are rejected
+  it('11. Invalid generated BOM structures are rejected by validation', () => {
+    const invalidBom = {
+      bomFormat: 'CycloneDX',
+      specVersion: '1.7',
+      serialNumber: 'urn:uuid:3e671687-395b-41f5-a30f-a58921a69b79',
+      version: 1,
+      metadata: {
+        timestamp: '2026-11-08T10:00:00.000Z',
+        component: {
+          type: 'application',
+          name: 'invalid-test',
+          version: '1.0.0',
+          'bom-ref': 'pkg:npm/invalid-test@1.0.0',
+        },
+      },
+      components: [
+        {
+          type: 'library',
+          name: 'dep-a',
+          version: '1.0.0',
+          'bom-ref': 'pkg:npm/dep-a@1.0.0',
+        },
+      ],
+      dependencies: [
+        {
+          ref: 'pkg:npm/invalid-test@1.0.0',
+          dependsOn: ['pkg:npm/nonexistent-dep@1.0.0'], // Dangling edge
+        },
+      ],
+    };
+
+    const valResult = validateStructure(invalidBom);
+    assert.equal(valResult.valid, false);
+    assert.ok(valResult.errors.some(e => e.includes('Dangling dependency reference')));
+  });
+
+  // Scenario 12: CLI does not write invalid BOM output
+  it('12. CLI does not write invalid BOM output and exits with code 1', () => {
+    const fixturePath = path.join(fixturesDir, 'invalid-project');
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sbom-test-cli-invalid-'));
+    const targetCdx = path.join(tmpDir, 'invalid.cdx.json');
+
+    try {
+      assert.throws(() => {
+        execFileSync(process.execPath, [cliScriptPath, 'scan', fixturePath, '--output', targetCdx], {
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      }, (err) => {
+        assert.equal(err.status, 1);
+        return true;
+      });
+
+      assert.equal(fs.existsSync(targetCdx), false, 'Invalid project must not produce BOM output');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // Scenario 13: CLI handles partial scans correctly
+  it('13. CLI handles partial scans correctly with exit code 0 and .partial.json', () => {
+    const fixturePath = path.join(fixturesDir, 'missing-lockfile-project');
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sbom-test-cli-partial2-'));
+    const targetCdx = path.join(tmpDir, 'report.cdx.json');
+    const expectedPartial = path.join(tmpDir, 'report.partial.json');
+
+    try {
+      const output = execFileSync(process.execPath, [cliScriptPath, 'scan', fixturePath, '--output', targetCdx], {
+        encoding: 'utf8',
+      });
+
+      assert.ok(output.includes('Partial scan completed'));
+      assert.equal(fs.existsSync(targetCdx), false);
+      assert.equal(fs.existsSync(expectedPartial), true);
+
+      const partialReport = JSON.parse(fs.readFileSync(expectedPartial, 'utf8'));
+      assert.equal(partialReport.scanStatus, 'partial');
+      assert.ok(partialReport.components.length > 0);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // Scenario 14: Validation errors are exposed in the returned result
+  it('14. Validation errors are exposed in the returned result structure', async () => {
+    const fixturePath = path.join(fixturesDir, 'simple-project');
+    const result = await scanProject(fixturePath);
+
+    assert.ok(result.validation);
+    assert.equal(typeof result.validation.valid, 'boolean');
+    assert.ok(Array.isArray(result.validation.errors));
+    assert.ok(Array.isArray(result.validation.warnings));
+  });
+
+  // Scenario 15: Valid generated BOMs can be serialized to JSON and parsed back without losing required fields
+  it('15. Valid generated BOMs can be serialized to JSON and parsed back without losing required fields', async () => {
+    const testFixtures = ['simple-project', 'workspace-with-lockfile-project', 'transitive-project'];
+
+    for (const fixtureName of testFixtures) {
+      const fixturePath = path.join(fixturesDir, fixtureName);
+      const result = await scanProject(fixturePath);
+
+      assert.ok(result.bom);
+      const serialized = JSON.stringify(result.bom, null, 2);
+      const parsed = JSON.parse(serialized);
+
+      assert.deepEqual(parsed, result.bom);
+
+      const revalidation = validateStructure(parsed);
+      assert.equal(revalidation.valid, true, `Revalidation failed for ${fixtureName}: ${revalidation.errors.join(', ')}`);
     }
   });
 });

@@ -55,6 +55,13 @@ interface ScanResult {
   components: Component[];
   dependencyEdges: Record<string, string[]>;
   bom: CycloneDXBom | null;
+  validation: ValidationResult | null;
+}
+
+interface ValidationResult {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
 }
 ```
 
@@ -71,6 +78,7 @@ interface ScanResult {
 | `components` | `Component[]` | Flat list of all discovered components (root package + local workspaces + third-party dependencies). |
 | `dependencyEdges` | `Record<string, string[]>` | Adjacency list mapping parent component `bomRef` to array of child `bomRef`s. |
 | `bom` | `object \| null` | Generated CycloneDX 1.7 JSON SBOM (`null` for `'partial'` and `'failed'` scans). |
+| `validation` | `ValidationResult \| null` | Structural validation result (`{ valid, errors, warnings }`), or `null` when no BOM is generated. |
 
 ---
 
@@ -246,7 +254,74 @@ interface ScanErrorItem {
 
 ---
 
-## 7. Fixture Reference Matrix
+## 7. CycloneDX BOM Generation & Validation Contract
+
+### CycloneDX Specification Version
+- `npm-sbom-tool` generates Software Bill of Materials conforming to **CycloneDX JSON Specification Version 1.7**.
+- Top-level BOM structure includes `bomFormat: 'CycloneDX'`, `specVersion: '1.7'`, `serialNumber: 'urn:uuid:<uuid>'`, and `version: 1`.
+
+### Structural Validation Rules (`validateStructure`)
+The scanner executes built-in, offline structural validation (`validateStructure(bom)`) on all generated BOMs before delivering the scan result. The validator checks:
+
+1. **Top-Level Requirements**:
+   - `bomFormat` must equal `"CycloneDX"`.
+   - `specVersion` must be a supported version string (`"1.7"`, `"1.6"`, `"1.5"`, `"1.4"`).
+   - `version` must be a positive integer >= 1.
+   - `serialNumber` must be a valid RFC 4122 UUID URN (`urn:uuid:<uuid>`).
+2. **Metadata Requirements**:
+   - `metadata` object is mandatory.
+   - `metadata.timestamp` must be a valid ISO-8601 date string.
+   - `metadata.tools` must be an object or array.
+   - `metadata.component` is mandatory and represents the root application with non-empty `type`, `name`, and `bom-ref`.
+   - If `purl` is present on `metadata.component`, it must validate against the PURL specification.
+3. **Component Requirements**:
+   - Every component in `bom.components` must be an object with non-empty `type`, `name`, `version`, and `bom-ref`.
+   - PURLs (`comp.purl`) must validate against Package URL format rules.
+   - Component `bom-ref` values must be strictly unique.
+   - **Collision Detection**: Collisions between `metadata.component['bom-ref']` and any entry in `bom.components` are rejected.
+4. **Dependency Graph Integrity**:
+   - `bom.dependencies` must be an array when present.
+   - Each entry must possess a valid `ref` and an array of `dependsOn` child references.
+   - **No Nonexistent References**: Every `ref` in `dependencies` must reference a known component (`metadata.component` or `components`).
+   - **No Dangling Edges**: Every target reference in `dependsOn` must exist in `metadata.component` or `components`.
+   - **No Duplicates**: Duplicate dependency entries for the same `ref` and duplicate child references in `dependsOn` are rejected.
+   - **Root Dependency Entry**: The root application component MUST possess a dependency entry in `bom.dependencies`.
+5. **Result Structure**:
+   - Returns `{ valid: boolean, errors: string[], warnings: string[] }`.
+   - All errors clearly identify the invalid field, index, component, or dependency reference.
+   - The validator never throws unexpected exceptions on malformed input.
+
+### Package URL Validation (`validatePurl`)
+The validator inspects package URLs to ensure:
+- Scheme prefix is strictly `pkg:`.
+- Package manager type is valid (e.g. `npm`).
+- Package name is non-empty, correctly preserving URL-encoded namespaces (`%40scope/pkg`).
+- Version is non-empty when `@` is present.
+- Qualifiers (`?`) and subpaths (`#`) are safely parsed and validated.
+
+### Scanner Pipeline Integration & Partial Scan Semantics
+1. **Complete Scans**:
+   - CycloneDX generation produces a complete BOM.
+   - `validateStructure(bom)` is executed.
+   - If valid: `status: 'complete'`, `bom: <BOM>`, `validation: { valid: true, errors: [], warnings: [] }`.
+   - If invalid: `status: 'partial'`, `bom: null` (invalid BOM is never returned), validation errors are recorded as `SCAN_ERROR` in `errors`, and `validation: { valid: false, errors: [...] }`.
+2. **Partial Scans**:
+   - When a lockfile is missing, corrupted, or unsupported, the scanner completes in `'partial'` mode.
+   - `bom: null` and `validation: null` are preserved.
+   - The scanner does not attempt to validate or emit a nonexistent or incomplete BOM.
+3. **CLI Behavior**:
+   - The CLI writes the generated CycloneDX SBOM to disk only when `status === 'complete'`, `bom !== null`, and `validation.valid === true`.
+   - If validation fails, the CLI writes no SBOM output, logs all validation errors to stderr, and exits with non-zero exit code (`1`).
+   - On partial scans, the CLI writes a `.partial.json` diagnostic report (not a `.cdx.json` SBOM) and exits with code `0`.
+   - On failed scans, the CLI writes no output and exits with code `1`.
+
+### JSON Schema Validation Status (`validateAgainstSchema`)
+- **Built-in Structural Validation**: Fully self-contained, offline, and zero-network.
+- **Official Schema Validation**: Exported via `validateAgainstSchema(bom, schema)` using `ajv` and `ajv-formats`. Callers may provide an official CycloneDX JSON schema object at runtime. Official multi-megabyte schema files are not bundled by default to maintain lightweight footprint and zero-network operational constraints.
+
+---
+
+## 8. Fixture Reference Matrix
 
 | Fixture Name | Category | Manifest | Lockfile | Expected Status | Key Validations |
 |---|---|---|---|---|---|
@@ -275,7 +350,7 @@ interface ScanErrorItem {
 
 ---
 
-## 8. Supported Features and Remaining Limitations
+## 9. Supported Features and Remaining Limitations
 
 ### Supported Features
 - Complete npm workspace discovery for array (`["packages/*"]`) and object (`{ "packages": ["packages/*"] }`) declarations.
@@ -283,7 +358,10 @@ interface ScanErrorItem {
 - First-party component tagging: `isFirstParty: true`, `classification: 'first-party'`, `origin: 'first-party'`.
 - Third-party component tagging: `isFirstParty: false`, `classification: 'third-party'`, `origin: 'third-party'`.
 - Lockfile v2/v3 symlink resolution: `link: true` entries map to local workspace components and populate `installPaths`.
-- Full CycloneDX 1.7 JSON SBOM generation for complete workspace scans, with root in `metadata.component` and workspaces in `components`.
+- Full CycloneDX 1.7 JSON SBOM generation for complete scans, placing root application in `metadata.component` and workspaces/libraries in `components`.
+- Complete structural validation (`validateStructure`) catching missing fields, invalid metadata, invalid PURLs, duplicate `bom-ref`s, and dangling dependency edges.
+- Zero-network, offline operation by default with optional schema validation (`validateAgainstSchema`).
+- Protected CLI writing: outputs valid CycloneDX SBOM on success, emits diagnostic `.partial.json` on partial scans, and exits with non-zero on validation failure.
 - Complete synchronous (`scanProjectSync`) and asynchronous (`scanProject`) scanner parity.
 
 ### Remaining Limitations
@@ -291,3 +369,4 @@ interface ScanErrorItem {
 - npm lockfile version 1 does not contain full packages tree information and triggers fallback to a partial scan.
 - Workspace projects without `package-lock.json` are scanned in partial mode; exact resolved versions and CycloneDX SBOM generation require a supported lockfile.
 - Incompatible workspace version ranges are not linked as workspace dependencies.
+- Official multi-megabyte CycloneDX JSON schema is not bundled locally; structural validation is performed natively while schema validation is available when a schema is provided by the caller.
