@@ -25,6 +25,7 @@ A lightweight, reusable JavaScript engine and tool for generating Software Bill 
 │   ├── cyclonedxGenerator.js  # CycloneDX 1.7 JSON SBOM generator
 │   ├── validator.js           # Structural and schema SBOM validation (validateStructure, validatePurl)
 │   ├── errors.js              # Standard error codes and status enums
+│   ├── osvClient.js           # OSV (Open Source Vulnerabilities) API client
 │   └── cli.js                 # Command-line interface
 └── test/
     ├── engine.test.js         # Engine entry point tests
@@ -35,6 +36,7 @@ A lightweight, reusable JavaScript engine and tool for generating Software Bill 
     ├── cyclonedxGenerator.test.js # SBOM output and graph tests
     ├── validator.test.js      # Dedicated structural & schema validation tests (49 tests)
     ├── scanner.test.js        # Scanner contract and fixture tests
+    ├── osvClient.test.js      # OSV API client unit tests
     └── integration.test.js    # Full pipeline and CLI integration tests (37 scenarios)
 ```
 
@@ -62,6 +64,7 @@ npm install
 - **`npm run test:cyclonedx`**: Runs unit tests for CycloneDX 1.7 SBOM generation and schema validation.
 - **`npm run test:validator`**: Runs unit tests for CycloneDX structural and schema validation.
 - **`npm run test:integration`**: Runs end-to-end pipeline and CLI integration tests.
+- **`npm run test:osv`**: Runs unit tests for the OSV vulnerability API client.
 - **`npm run scan <path>`**: Runs the CLI scanner against a specified target project path.
 - **`npm run check`**: Runs syntax validation checks across all source files using `node --check`.
 
@@ -146,3 +149,65 @@ node src/cli.js scan fixtures/simple-project
 node src/cli.js scan fixtures/missing-lockfile-project --output ./bom.cdx.json
 # Writes: ./bom.partial.json (exits 0)
 ```
+
+## OSV Vulnerability API Client
+
+The `osvClient` module queries the [OSV (Open Source Vulnerabilities)](https://osv.dev/) API to retrieve known vulnerabilities for npm dependencies.
+
+### Query a single package
+
+```javascript
+import { queryPackage } from 'npm-sbom-tool';
+
+const result = await queryPackage({ name: 'lodash', version: '4.17.20' });
+// result.package    → { name: 'lodash', version: '4.17.20', ecosystem: 'npm' }
+// result.vulnerabilities → [{ id, summary, details, aliases, severity, references, affected, published, modified }]
+```
+
+### Query multiple packages
+
+```javascript
+import { queryPackages } from 'npm-sbom-tool';
+
+const results = await queryPackages([
+  { name: 'lodash', version: '4.17.20' },
+  { name: 'express', version: '4.18.2' },
+]);
+// Each entry: { package, vulnerabilities } on success
+// On per-package failure: { package, vulnerabilities: [], error: { code, message } }
+```
+
+### Input
+
+- `name` (string): npm package name.
+- `version` (string): Installed version.
+- `ecosystem` (string, optional): Defaults to `'npm'`.
+
+### Output
+
+Each vulnerability object contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `string \| null` | OSV vulnerability ID (e.g. `GHSA-...`, `CVE-...`). |
+| `summary` | `string \| null` | Short vulnerability summary. |
+| `details` | `string \| null` | Detailed description. |
+| `aliases` | `string[]` | Alternative IDs (e.g. CVE aliases). |
+| `severity` | `object[]` | CVSS severity scores. |
+| `references` | `object[]` | Advisory URLs and references. |
+| `affected` | `object[]` | Affected package/version information. |
+| `published` | `string \| null` | Publication timestamp. |
+| `modified` | `string \| null` | Last modification timestamp. |
+
+### Error handling
+
+Errors are thrown as `OsvError` with a `code` property:
+
+| Code | Meaning |
+|---|---|
+| `NETWORK_ERROR` | Network connectivity failure. |
+| `REQUEST_TIMEOUT` | Request exceeded 10s timeout. |
+| `API_ERROR` | Non-2xx HTTP response from OSV API. |
+| `INVALID_RESPONSE` | Malformed or unexpected JSON response. |
+
+When using `queryPackages`, individual failures are captured per-package in the `error` field without failing the entire batch.
