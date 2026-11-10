@@ -11,3 +11,4 @@ export {
   classifyComponents,
   isVersionCompatible,
 } from './workspaceDiscovery.js';
+export { queryPackage, queryPackages, OsvError } from './osvClient.js';
