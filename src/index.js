@@ -12,3 +12,17 @@ export {
   isVersionCompatible,
 } from './workspaceDiscovery.js';
 export { queryPackage, queryPackages, OsvError } from './osvClient.js';
+export {
+  matchVulnerabilities,
+  isVersionAffected,
+  evaluateVersionAgainstRange,
+  parseSemver,
+  compareSemver,
+} from './vulnerabilityMatcher.js';
+export {
+  generateFindings,
+  createFindings,
+  deduplicateFindings,
+  extractSeverity,
+  extractFixedVersions,
+} from './vulnerabilityFindings.js';
