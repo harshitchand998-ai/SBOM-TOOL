@@ -56,11 +56,22 @@ interface ScanResult {
   dependencyEdges: Record<string, string[]>;
   bom: CycloneDXBom | null;
   validation: ValidationResult | null;
+  vulnerabilities: VulnerabilityAnalysisResult | null;
 }
 
 interface ValidationResult {
   valid: boolean;
   errors: string[];
+  warnings: string[];
+}
+
+interface VulnerabilityAnalysisResult {
+  status: 'completed' | 'partial' | 'failed';
+  findings: VulnerabilityFinding[];
+  scannedPackages: number;
+  totalPackages: number;
+  vulnerablePackages: number;
+  errors: Array<{ package: object | null; error: string; code?: string }>;
   warnings: string[];
 }
 ```
@@ -79,6 +90,7 @@ interface ValidationResult {
 | `dependencyEdges` | `Record<string, string[]>` | Adjacency list mapping parent component `bomRef` to array of child `bomRef`s. |
 | `bom` | `object \| null` | Generated CycloneDX 1.7 JSON SBOM (`null` for `'partial'` and `'failed'` scans). |
 | `validation` | `ValidationResult \| null` | Structural validation result (`{ valid, errors, warnings }`), or `null` when no BOM is generated. |
+| `vulnerabilities` | `VulnerabilityAnalysisResult \| null` | OSV vulnerability analysis findings, or `null` when not requested or scan is incomplete/failed. |
 
 ---
 
@@ -370,3 +382,57 @@ The validator inspects package URLs to ensure:
 - Workspace projects without `package-lock.json` are scanned in partial mode; exact resolved versions and CycloneDX SBOM generation require a supported lockfile.
 - Incompatible workspace version ranges are not linked as workspace dependencies.
 - Official multi-megabyte CycloneDX JSON schema is not bundled locally; structural validation is performed natively while schema validation is available when a schema is provided by the caller.
+
+---
+
+## 10. Vulnerability Analysis Pipeline Contract (`vulnerabilities`)
+
+When requested via `scanProject(projectPath, { vulnerabilities: true })` or the `--vulnerabilities` (`-v`) CLI flag, the scanner runs an integrated vulnerability detection workflow using the OSV (Open Source Vulnerabilities) API.
+
+### Workflow
+1. Complete, structurally valid CycloneDX SBOM is generated.
+2. Third-party components are extracted and deduplicated (`name@version`).
+3. Root application and first-party workspace components are excluded from external queries.
+4. OSV API is queried in controlled concurrency batches (`queryPackages`).
+5. Installed dependency versions are matched against OSV affected SemVer ranges (`matchVulnerabilities`).
+6. Structured, deduplicated findings are generated and classified as direct or transitive (`generateFindings`).
+7. Findings and scan metrics are attached to `result.vulnerabilities`.
+
+### Result Schema (`result.vulnerabilities`)
+
+```typescript
+interface VulnerabilityAnalysisResult {
+  status: 'completed' | 'partial' | 'failed';
+  findings: VulnerabilityFinding[];
+  scannedPackages: number;
+  totalPackages: number;
+  vulnerablePackages: number;
+  errors: Array<{ package: object | null; error: string; code?: string }>;
+  warnings: string[];
+}
+
+interface VulnerabilityFinding {
+  id: string; // Vulnerability ID (e.g. GHSA-..., CVE-...)
+  aliases: string[]; // Aliases (e.g. ['CVE-2021-99999'])
+  packageName: string;
+  ecosystem: string; // Typically 'npm'
+  installedVersion: string;
+  dependencyType: 'direct' | 'transitive' | 'unknown';
+  status: 'vulnerable' | 'unable-to-evaluate';
+  severity: { type: string; score: string } | null;
+  summary: string | null;
+  details: string | null;
+  affectedRanges: Array<{ type: string; events: Array<object> }>;
+  fixedVersions: string[];
+  references: Array<{ type: string; url: string }>;
+}
+```
+
+### Operational Statuses
+- **`completed`**: All eligible packages were queried successfully. If 0 vulnerabilities match, `findings` is `[]` and `vulnerablePackages` is `0`.
+- **`partial`**: One or more package queries failed (e.g. timeout or network glitch), but other packages succeeded. Successful findings are preserved; failed packages are recorded in `errors` and not marked unaffected.
+- **`failed`**: All package queries failed (e.g. total network outage or API error). The generated SBOM remains 100% valid.
+
+### Incomplete or Invalid SBOM Behavior
+If the base scan produces a `'partial'` or `'failed'` status (e.g. missing lockfile or invalid project), vulnerability analysis is automatically skipped and `result.vulnerabilities` is set to `null`.
+
