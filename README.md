@@ -26,6 +26,9 @@ A lightweight, reusable JavaScript engine and tool for generating Software Bill 
 │   ├── validator.js           # Structural and schema SBOM validation (validateStructure, validatePurl)
 │   ├── errors.js              # Standard error codes and status enums
 │   ├── osvClient.js           # OSV (Open Source Vulnerabilities) API client
+│   ├── vulnerabilityMatcher.js # SemVer comparison & OSV range evaluation
+│   ├── vulnerabilityFindings.js # Finding normalization, severity, & deduplication
+│   ├── vulnerabilityChecker.js # Vulnerability pipeline orchestration
 │   └── cli.js                 # Command-line interface
 └── test/
     ├── engine.test.js         # Engine entry point tests
@@ -37,6 +40,9 @@ A lightweight, reusable JavaScript engine and tool for generating Software Bill 
     ├── validator.test.js      # Dedicated structural & schema validation tests (49 tests)
     ├── scanner.test.js        # Scanner contract and fixture tests
     ├── osvClient.test.js      # OSV API client unit tests
+    ├── vulnerabilityMatcher.test.js # Version matching & range evaluation tests
+    ├── vulnerabilityFindings.test.js # Finding normalization & deduplication tests
+    ├── vulnerabilityIntegration.test.js # End-to-end vulnerability pipeline tests
     └── integration.test.js    # Full pipeline and CLI integration tests (37 scenarios)
 ```
 
@@ -65,6 +71,9 @@ npm install
 - **`npm run test:validator`**: Runs unit tests for CycloneDX structural and schema validation.
 - **`npm run test:integration`**: Runs end-to-end pipeline and CLI integration tests.
 - **`npm run test:osv`**: Runs unit tests for the OSV vulnerability API client.
+- **`npm run test:matcher`**: Runs unit tests for semantic version matching and range evaluation.
+- **`npm run test:findings`**: Runs unit tests for finding extraction and deduplication.
+- **`npm run test:vuln`**: Runs comprehensive integration tests for vulnerability detection.
 - **`npm run scan <path>`**: Runs the CLI scanner against a specified target project path.
 - **`npm run check`**: Runs syntax validation checks across all source files using `node --check`.
 
@@ -145,6 +154,12 @@ node src/cli.js scan fixtures/workspace-with-lockfile-project --output ./bom.cdx
 # Scan a simple project (default output: ./sbom-output.cdx.json)
 node src/cli.js scan fixtures/simple-project
 
+# Scan a project and analyze dependencies for vulnerabilities via OSV
+node src/cli.js scan fixtures/simple-project --vulnerabilities
+
+# Specify custom output path with vulnerability detection
+node src/cli.js scan fixtures/simple-project --output ./bom.cdx.json -v
+
 # When scanning a partial project (missing lockfile), a diagnostic report is written instead:
 node src/cli.js scan fixtures/missing-lockfile-project --output ./bom.cdx.json
 # Writes: ./bom.partial.json (exits 0)
@@ -208,6 +223,93 @@ Errors are thrown as `OsvError` with a `code` property:
 | `NETWORK_ERROR` | Network connectivity failure. |
 | `REQUEST_TIMEOUT` | Request exceeded 10s timeout. |
 | `API_ERROR` | Non-2xx HTTP response from OSV API. |
+| `RATE_LIMITED` | HTTP 429 rate limit exceeded. |
+| `INVALID_INPUT` | Package object missing or has empty name/version/ecosystem. |
 | `INVALID_RESPONSE` | Malformed or unexpected JSON response. |
 
 When using `queryPackages`, individual failures are captured per-package in the `error` field without failing the entire batch.
+
+## Integrated Vulnerability Detection Pipeline
+
+The vulnerability detection pipeline connects SBOM dependency generation with the OSV API and semantic version matching engine.
+
+### How It Works
+
+1. **Extraction & Deduplication**: Extracts all third-party dependencies from the resolved SBOM or scan result. Root applications and first-party local workspace packages are excluded from external queries. Packages are deduplicated by `name@version` so each unique version is queried only once.
+2. **OSV API Queries**: Dependencies are queried against the official OSV API (`https://api.osv.dev/v1/query`) in concurrent batches (default concurrency: 8, configurable).
+3. **SemVer Range Matching**: Every advisory is evaluated against the installed semantic version using native SemVer 2.0.0 rules:
+   - `introduced`: inclusive lower bound (or `'0'` for beginning of time).
+   - `fixed`: exclusive upper bound (version `< fixed` is vulnerable, `>= fixed` is unaffected).
+   - `last_affected`: inclusive upper bound.
+   - `limit`: exclusive upper bound.
+4. **Direct & Transitive Classification**: Leverages the CycloneDX dependency graph to accurately classify each finding as `direct` or `transitive`.
+5. **Metadata Extraction & Deduplication**: Extracts CVSS and ecosystem severity scores, semantic fixed versions (excluding git hashes), aliases, summaries, and references. Identical findings for the same vulnerability, package, and version are merged cleanly.
+
+### Enabling Vulnerability Detection
+
+#### CLI Flag
+```bash
+node src/cli.js scan ./path/to/project --vulnerabilities
+# or short flag:
+node src/cli.js scan ./path/to/project -v
+```
+
+#### Programmatic API
+```javascript
+import { scanProject, checkVulnerabilities } from 'npm-sbom-tool';
+
+// 1. Through scanProject options
+const result = await scanProject('./fixtures/simple-project', {
+  vulnerabilities: true,
+  concurrency: 8, // Optional: concurrency limit
+  timeout: 10000, // Optional: timeout in ms
+});
+
+console.log(result.vulnerabilities.status); // 'completed' | 'partial' | 'failed'
+console.log(result.vulnerabilities.findings);
+
+// 2. Standalone vulnerability checker on existing components or BOM
+const vulns = await checkVulnerabilities(result.bom);
+console.log(vulns.findings);
+```
+
+### Interpreting Findings
+
+Each finding object contains:
+
+```typescript
+interface VulnerabilityFinding {
+  id: string; // OSV or GHSA identifier (e.g., 'GHSA-odd-01')
+  aliases: string[]; // Associated CVEs (e.g., ['CVE-2021-99999'])
+  packageName: string; // npm package name
+  ecosystem: string; // 'npm'
+  installedVersion: string; // Exact installed version (e.g., '3.0.1')
+  dependencyType: 'direct' | 'transitive' | 'unknown';
+  status: 'vulnerable' | 'unable-to-evaluate';
+  severity: { type: string; score: string } | null;
+  summary: string | null;
+  details: string | null;
+  affectedRanges: Array<{ type: string; events: Array<object> }>;
+  fixedVersions: string[]; // Valid SemVer versions that resolve the issue
+  references: Array<{ type: string; url: string }>;
+}
+```
+
+#### Status Meanings
+- **`vulnerable`**: The installed version falls definitively within the advisory's affected SemVer range.
+- **`unaffected`**: The installed version is outside the affected range or equal to/above the fixed version (unaffected packages do not produce vulnerability findings).
+- **`unable-to-evaluate`**: The advisory contains only non-SemVer ranges (e.g. Git commit SHAs) or malformed range events, preventing deterministic version evaluation. Only included when `options.includeUnableToEvaluate = true`.
+
+#### Overall Scan Status
+- **`completed`**: All eligible packages were successfully queried against OSV.
+- **`partial`**: One or more package queries encountered network or timeout errors, but other packages succeeded. Successful findings are retained; failed packages are recorded in `errors` and not assumed to be safe.
+- **`failed`**: All package queries failed (e.g., complete network outage).
+
+### Failure Isolation & SBOM Independence
+Vulnerability API failures are completely isolated from SBOM generation. Even if the network is down or OSV returns HTTP 500/429, the generated CycloneDX SBOM remains 100% valid, intact, and written to disk.
+
+### Limitations
+- Only npm ecosystem advisories are evaluated.
+- Advisories without SEMVER ranges (e.g. pure Git commit SHAs without version tags) cannot be evaluated against installed npm versions.
+- Vulnerability analysis requires a complete scan with a valid lockfile; partial scans (manifest-only) skip vulnerability detection.
+
