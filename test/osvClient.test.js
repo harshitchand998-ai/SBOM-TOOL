@@ -176,6 +176,90 @@ describe('osvClient', () => {
         }
       );
     });
+
+    it('throws RATE_LIMITED on HTTP 429 response', async () => {
+      globalThis.fetch = mock.fn(async () => mockResponse(null, { status: 429, ok: false }));
+
+      await assert.rejects(
+        () => queryPackage({ name: 'rate-limited-pkg', version: '1.0.0' }),
+        (err) => {
+          assert.ok(err instanceof OsvError);
+          assert.equal(err.code, 'RATE_LIMITED');
+          assert.ok(err.message.includes('rate limit exceeded'));
+          return true;
+        }
+      );
+    });
+
+    it('throws INVALID_INPUT when package object is missing or invalid', async () => {
+      await assert.rejects(
+        () => queryPackage(null),
+        (err) => {
+          assert.ok(err instanceof OsvError);
+          assert.equal(err.code, 'INVALID_INPUT');
+          return true;
+        }
+      );
+
+      await assert.rejects(
+        () => queryPackage('not an object'),
+        (err) => {
+          assert.ok(err instanceof OsvError);
+          assert.equal(err.code, 'INVALID_INPUT');
+          return true;
+        }
+      );
+    });
+
+    it('throws INVALID_INPUT when name, version, or ecosystem are empty or missing', async () => {
+      await assert.rejects(
+        () => queryPackage({ name: '', version: '1.0.0' }),
+        (err) => {
+          assert.ok(err instanceof OsvError);
+          assert.equal(err.code, 'INVALID_INPUT');
+          assert.match(err.message, /name/);
+          return true;
+        }
+      );
+
+      await assert.rejects(
+        () => queryPackage({ name: 'pkg', version: '' }),
+        (err) => {
+          assert.ok(err instanceof OsvError);
+          assert.equal(err.code, 'INVALID_INPUT');
+          assert.match(err.message, /version/);
+          return true;
+        }
+      );
+
+      await assert.rejects(
+        () => queryPackage({ name: 'pkg', version: '1.0.0', ecosystem: '   ' }),
+        (err) => {
+          assert.ok(err instanceof OsvError);
+          assert.equal(err.code, 'INVALID_INPUT');
+          assert.match(err.message, /ecosystem/);
+          return true;
+        }
+      );
+    });
+
+    it('preserves database_specific and ecosystem_specific fields in normalized response', async () => {
+      globalThis.fetch = mock.fn(async () => mockResponse({
+        vulns: [{
+          id: 'GHSA-with-db-specific',
+          summary: 'DB specific vuln',
+          database_specific: { severity: 'HIGH' },
+          ecosystem_specific: { custom: 'data' },
+          schema_version: '1.4.0',
+        }],
+      }));
+
+      const result = await queryPackage({ name: 'pkg-db', version: '1.0.0' });
+      assert.equal(result.vulnerabilities.length, 1);
+      assert.deepEqual(result.vulnerabilities[0].database_specific, { severity: 'HIGH' });
+      assert.deepEqual(result.vulnerabilities[0].ecosystem_specific, { custom: 'data' });
+      assert.equal(result.vulnerabilities[0].schema_version, '1.4.0');
+    });
   });
 
   describe('queryPackages', () => {
@@ -226,9 +310,46 @@ describe('osvClient', () => {
       assert.deepEqual(results[1].vulnerabilities, []);
     });
 
-    it('returns empty array for empty input', async () => {
-      const results = await queryPackages([]);
-      assert.deepEqual(results, []);
+    it('records INVALID_INPUT error for malformed package entry without failing others', async () => {
+      globalThis.fetch = mock.fn(async () => mockResponse({ vulns: [] }));
+
+      const results = await queryPackages([
+        { name: 'valid-pkg', version: '1.0.0' },
+        { name: '', version: '1.0.0' },
+      ]);
+
+      assert.equal(results.length, 2);
+      assert.equal(results[0].error, undefined);
+      assert.ok(results[1].error);
+      assert.equal(results[1].error.code, 'INVALID_INPUT');
+    });
+
+    it('returns empty array for empty or non-array input', async () => {
+      assert.deepEqual(await queryPackages([]), []);
+      assert.deepEqual(await queryPackages(null), []);
+      assert.deepEqual(await queryPackages(undefined), []);
+    });
+
+    it('respects concurrency limit option', async () => {
+      let activeRequests = 0;
+      let maxActiveRequests = 0;
+
+      globalThis.fetch = mock.fn(async () => {
+        activeRequests++;
+        maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+        await new Promise(r => setTimeout(r, 10));
+        activeRequests--;
+        return mockResponse({ vulns: [] });
+      });
+
+      const pkgList = Array.from({ length: 6 }, (_, i) => ({
+        name: `pkg-${i}`,
+        version: '1.0.0',
+      }));
+
+      const results = await queryPackages(pkgList, { concurrency: 2 });
+      assert.equal(results.length, 6);
+      assert.ok(maxActiveRequests <= 2, `maxActiveRequests ${maxActiveRequests} should be <= 2`);
     });
   });
 });
