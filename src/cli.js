@@ -23,18 +23,20 @@ function printUsage() {
 npm-sbom-tool — Software Bill of Materials Scanner
 
 Usage:
-  node src/cli.js scan <project-path> [--output <output-path>]
+  node src/cli.js scan <project-path> [--output <output-path>] [--vulnerabilities]
 
 Commands:
   scan    Scan an npm project and generate a CycloneDX SBOM.
 
 Options:
-  --output, -o    Output file path for the generated SBOM.
-                  Default: ./sbom-output.cdx.json
+  --output, -o          Output file path for the generated SBOM.
+                        Default: ./sbom-output.cdx.json
+  --vulnerabilities, -v Enable OSV vulnerability analysis for discovered dependencies.
 
 Examples:
   node src/cli.js scan ./my-application
   node src/cli.js scan /Users/user/projects/app --output ./bom.json
+  node src/cli.js scan ./my-application --vulnerabilities
   node src/cli.js scan "./path with spaces/project"
 `);
 }
@@ -61,6 +63,7 @@ async function main() {
 
   const projectPath = args[1];
   let outputPath = './sbom-output.cdx.json';
+  let checkVulns = false;
 
   // Parse optional arguments
   for (let i = 2; i < args.length; i++) {
@@ -71,13 +74,15 @@ async function main() {
       }
       outputPath = args[i + 1];
       i++; // skip the value
+    } else if (args[i] === '--vulnerabilities' || args[i] === '-v') {
+      checkVulns = true;
     }
   }
 
   console.log(`Scanning project: ${path.resolve(projectPath)}`);
   console.log();
 
-  const result = await scanProject(projectPath);
+  const result = await scanProject(projectPath, { vulnerabilities: checkVulns });
 
   // Report scan status
   console.log(`Scan status: ${result.status}`);
@@ -120,6 +125,56 @@ async function main() {
       console.error(`  ✗ ${err}`);
     }
     console.log();
+  }
+
+  // Report vulnerability analysis if requested
+  if (checkVulns) {
+    console.log('--- Vulnerability Analysis ---');
+    if (!result.vulnerabilities) {
+      console.log('Vulnerability analysis skipped (complete and valid SBOM required).');
+      console.log();
+    } else {
+      const v = result.vulnerabilities;
+      console.log(`Status: ${v.status.toUpperCase()}`);
+      console.log(`Packages scanned: ${v.scannedPackages}/${v.totalPackages}`);
+      console.log(`Vulnerabilities found: ${v.findings.length}`);
+      console.log();
+
+      if (v.warnings && v.warnings.length > 0) {
+        for (const warn of v.warnings) {
+          console.log(`  ⚠ ${warn}`);
+        }
+        console.log();
+      }
+
+      if (v.errors && v.errors.length > 0) {
+        console.log(`Vulnerability query errors (${v.errors.length}):`);
+        for (const err of v.errors) {
+          const pkgStr = err.package ? `${err.package.name}@${err.package.version}` : 'unknown';
+          console.error(`  ✗ [${err.code || 'QUERY_ERROR'}] ${pkgStr}: ${err.error}`);
+        }
+        console.log();
+      }
+
+      if (v.findings.length > 0) {
+        console.log('Vulnerability Findings:');
+        for (const f of v.findings) {
+          const sevStr = f.severity ? `[${f.severity.type}: ${f.severity.score}]` : '[SEVERITY: UNKNOWN]';
+          const fixStr = f.fixedVersions?.length > 0 ? ` (Fixed in: ${f.fixedVersions.join(', ')})` : ' (No fix available)';
+          console.log(`  • ${f.id} ${sevStr} - ${f.packageName}@${f.installedVersion} (${f.dependencyType})${fixStr}`);
+          if (f.summary) {
+            console.log(`    Summary: ${f.summary}`);
+          }
+        }
+        console.log();
+      } else if (v.status === 'completed') {
+        console.log('✔ No known vulnerabilities found.');
+        console.log();
+      } else if (v.status === 'partial') {
+        console.log('⚠ Incomplete analysis: Some packages could not be checked due to errors.');
+        console.log();
+      }
+    }
   }
 
   // Write output

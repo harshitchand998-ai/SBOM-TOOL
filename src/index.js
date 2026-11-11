@@ -26,3 +26,7 @@ export {
   extractSeverity,
   extractFixedVersions,
 } from './vulnerabilityFindings.js';
+export {
+  checkVulnerabilities,
+  extractEligiblePackages,
+} from './vulnerabilityChecker.js';

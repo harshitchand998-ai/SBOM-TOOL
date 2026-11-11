@@ -4,6 +4,7 @@ import { resolveDependencies, resolveManifestOnly } from '../dependencyResolver.
 import { generateCycloneDX } from '../cyclonedxGenerator.js';
 import { discoverFirstPartyComponentsSync } from '../workspaceDiscovery.js';
 import { validateStructure } from '../validator.js';
+import { checkVulnerabilities } from '../vulnerabilityChecker.js';
 import { ScanStatus, ErrorCodes, createScanError } from '../errors.js';
 
 /**
@@ -34,6 +35,7 @@ export function scanProjectSync(projectPath) {
       dependencyEdges: {},
       bom: null,
       validation: null,
+      vulnerabilities: null,
     };
   }
 
@@ -50,6 +52,7 @@ export function scanProjectSync(projectPath) {
       dependencyEdges: {},
       bom: null,
       validation: null,
+      vulnerabilities: null,
     };
   }
 
@@ -69,6 +72,7 @@ export function scanProjectSync(projectPath) {
       dependencyEdges: {},
       bom: null,
       validation: null,
+      vulnerabilities: null,
     };
   }
 
@@ -130,6 +134,7 @@ export function scanProjectSync(projectPath) {
         dependencyEdges: {},
         bom: null,
         validation: null,
+        vulnerabilities: null,
       };
     }
   } else {
@@ -201,18 +206,31 @@ export function scanProjectSync(projectPath) {
     dependencyEdges: edgesObject,
     bom,
     validation,
+    vulnerabilities: null,
   };
 }
 
 /**
  * Asynchronously scans a project directory and produces a structured scan result
- * with components, dependency edges, CycloneDX SBOM, and validation information.
+ * with components, dependency edges, CycloneDX SBOM, validation information,
+ * and optional OSV vulnerability findings.
  *
  * @param {string} projectPath - Path to the project directory.
- * @returns {Promise<object>} Scan result containing status, components, errors, warnings, BOM, and validation.
+ * @param {object} [options={}] - Scan options (e.g., vulnerabilities: boolean).
+ * @returns {Promise<object>} Scan result containing status, components, errors, warnings, BOM, validation, and vulnerabilities.
  */
-export async function scanProject(projectPath) {
-  return scanProjectSync(projectPath);
+export async function scanProject(projectPath, options = {}) {
+  const result = scanProjectSync(projectPath);
+
+  if (options && options.vulnerabilities) {
+    if (result.status === ScanStatus.COMPLETE && result.bom && result.validation?.valid) {
+      result.vulnerabilities = await checkVulnerabilities(result, options);
+    } else {
+      result.vulnerabilities = null;
+    }
+  }
+
+  return result;
 }
 
 export default scanProject;
