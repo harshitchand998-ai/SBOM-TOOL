@@ -110,8 +110,19 @@ export function parsePurl(purl) {
     name = pathPart;
   }
 
-  const decodedNamespace = namespace ? decodeURIComponent(namespace) : null;
-  const decodedName = decodeURIComponent(name);
+  let decodedNamespace = null;
+  let decodedName = null;
+  let decodedVersion = version;
+  try {
+    decodedNamespace = namespace ? decodeURIComponent(namespace) : null;
+    decodedName = decodeURIComponent(name);
+    if (decodedVersion) {
+      decodedVersion = decodeURIComponent(decodedVersion);
+    }
+  } catch {
+    return null; // Malformed percent-encoding renders the PURL invalid
+  }
+
   const fullName = decodedNamespace ? `${decodedNamespace}/${decodedName}` : decodedName;
 
   return {
@@ -119,7 +130,7 @@ export function parsePurl(purl) {
     namespace: decodedNamespace,
     name: decodedName,
     fullName,
-    version,
+    version: decodedVersion,
     qualifiers,
     subpath,
   };
@@ -147,21 +158,8 @@ function normalizeSbomInput(input) {
     };
   }
 
-  // Case 1: CycloneDX BOM object
-  if (input.bomFormat === 'CycloneDX' || input.metadata || Array.isArray(input.components)) {
-    const rootComponent = input.metadata?.component || null;
-    const components = Array.isArray(input.components) ? input.components : [];
-    const dependencies = Array.isArray(input.dependencies) ? input.dependencies : [];
-    return {
-      rootComponent,
-      components,
-      dependencies,
-      isValidContainer: true,
-    };
-  }
-
-  // Case 2: Internal scanResult object
-  if (input.status && (input.components || input.dependencyEdges)) {
+  // Case 1: Internal scanResult object (must be checked before generic components array check)
+  if (input.bomFormat !== 'CycloneDX' && (input.status || input.dependencyEdges || input.components instanceof Map)) {
     let componentsList = [];
     if (input.components instanceof Map) {
       componentsList = Array.from(input.components.values());
@@ -188,6 +186,19 @@ function normalizeSbomInput(input) {
       rootComponent: rootComp,
       components: otherComps,
       dependencies: dependenciesList,
+      isValidContainer: true,
+    };
+  }
+
+  // Case 2: CycloneDX BOM object (or BOM-like container)
+  if (input.bomFormat === 'CycloneDX' || input.metadata || Array.isArray(input.components)) {
+    const rootComponent = input.metadata?.component || null;
+    const components = Array.isArray(input.components) ? input.components : [];
+    const dependencies = Array.isArray(input.dependencies) ? input.dependencies : [];
+    return {
+      rootComponent,
+      components,
+      dependencies,
       isValidContainer: true,
     };
   }
@@ -242,6 +253,14 @@ function checkComponentMetadata(comp, source, options = {}) {
     });
   }
 
+  const hasPurl = purl !== undefined && purl !== null && typeof purl === 'string' && purl.trim() !== '';
+  const trimmedPurl = hasPurl ? purl.trim() : null;
+  const parsedPurl = trimmedPurl ? parsePurl(trimmedPurl) : null;
+  const explicitEcosystem = typeof comp.ecosystem === 'string' && comp.ecosystem.trim() !== ''
+    ? comp.ecosystem.trim().toLowerCase()
+    : null;
+  const effectiveEcosystem = explicitEcosystem || parsedPurl?.type || null;
+
   // 2. Missing or invalid package version
   const hasVersion = version !== undefined && version !== null && typeof version === 'string' && version.trim() !== '';
 
@@ -263,10 +282,9 @@ function checkComponentMetadata(comp, source, options = {}) {
   } else {
     // Version is present — check validity
     const trimmedVersion = version.trim();
-    const ecosystem = (comp.ecosystem || 'npm').toLowerCase();
 
-    // In npm ecosystem, versions must conform to SemVer 2.0.0
-    if (ecosystem === 'npm') {
+    // SemVer 2.0.0 validation applies when ecosystem is 'npm' or unspecified (default)
+    if (!effectiveEcosystem || effectiveEcosystem === 'npm') {
       const parsed = parseSemver(trimmedVersion);
       if (!parsed) {
         anomalies.push({
@@ -284,8 +302,6 @@ function checkComponentMetadata(comp, source, options = {}) {
   }
 
   // 3. Missing, invalid, or inconsistent PURL
-  const hasPurl = purl !== undefined && purl !== null && typeof purl === 'string' && purl.trim() !== '';
-
   if (!hasPurl) {
     if (options.requirePurl !== false) {
       anomalies.push({
@@ -300,8 +316,7 @@ function checkComponentMetadata(comp, source, options = {}) {
       });
     }
   } else {
-    const trimmedPurl = purl.trim();
-    const parsed = parsePurl(trimmedPurl);
+    const parsed = parsedPurl;
 
     if (!parsed) {
       anomalies.push({
@@ -319,15 +334,20 @@ function checkComponentMetadata(comp, source, options = {}) {
       const compName = baseComponentInfo.name;
       const compVer = baseComponentInfo.version;
 
-      // Check name consistency
-      if (compName && parsed.fullName !== compName && parsed.name !== compName) {
+      // Check name consistency (supporting optional CycloneDX group + name)
+      const compGroup = typeof comp.group === 'string' && comp.group.trim() !== '' ? comp.group.trim() : null;
+      const expectedFullName = compName && compGroup && !compName.includes('/')
+        ? `${compGroup}/${compName}`
+        : compName;
+
+      if (expectedFullName && parsed.fullName !== expectedFullName) {
         anomalies.push({
           type: AnomalyType.INCONSISTENT_PURL,
           severity: AnomalySeverity.ERROR,
           component: { ...baseComponentInfo, purl: trimmedPurl },
           field: 'purl.name',
           message: 'PURL package name does not match component name.',
-          details: `PURL specifies package name "${parsed.fullName}" but component metadata declares name "${compName}".`,
+          details: `PURL specifies package name "${parsed.fullName}" but component metadata declares name "${expectedFullName}".`,
           recommendation: 'Update the PURL package name to match the component name.',
           source,
         });
@@ -347,17 +367,16 @@ function checkComponentMetadata(comp, source, options = {}) {
         });
       }
 
-      // Check ecosystem consistency (e.g. npm)
-      const expectedEcosystem = (comp.ecosystem || 'npm').toLowerCase();
-      if (expectedEcosystem && parsed.type !== expectedEcosystem) {
+      // Check ecosystem consistency only when component explicitly declares an ecosystem
+      if (explicitEcosystem && parsed.type !== explicitEcosystem) {
         anomalies.push({
           type: AnomalyType.INCONSISTENT_PURL,
           severity: AnomalySeverity.ERROR,
           component: { ...baseComponentInfo, purl: trimmedPurl },
           field: 'purl.type',
           message: 'PURL package type does not match expected component ecosystem.',
-          details: `PURL specifies type "${parsed.type}" but component belongs to ecosystem "${expectedEcosystem}".`,
-          recommendation: `Set the PURL scheme type to "pkg:${expectedEcosystem}/...".`,
+          details: `PURL specifies type "${parsed.type}" but component belongs to ecosystem "${explicitEcosystem}".`,
+          recommendation: `Set the PURL scheme type to "pkg:${explicitEcosystem}/...".`,
           source,
         });
       }
@@ -366,7 +385,8 @@ function checkComponentMetadata(comp, source, options = {}) {
 
   // 4. Missing external references
   // Third-party library components in npm SBOMs are expected to specify external references (e.g. distribution url).
-  if (options.checkReferences !== false && !isRoot && comp.type === 'library') {
+  const isWorkspace = Boolean(comp.isFirstParty) || comp.dependencyType === 'workspace';
+  if (options.checkReferences !== false && !isRoot && !isWorkspace && comp.type === 'library') {
     const hasRefs = Array.isArray(comp.externalReferences) && comp.externalReferences.length > 0;
     if (!hasRefs) {
       anomalies.push({
@@ -627,8 +647,11 @@ function deduplicateAnomalies(anomalies) {
     const parentRef = a.parentRef || '';
     const depRef = a.dependencyRef || '';
     const field = a.field || '';
+    // Preserve per-component metadata anomalies across distinct array indices/sources,
+    // while deduplicating repeated graph-level dependency edge anomalies.
+    const scopeKey = (!parentRef && !depRef) ? (a.source || '') : '';
 
-    const key = `${a.type}::${compRef}::${parentRef}::${depRef}::${field}`;
+    const key = `${a.type}::${compRef}::${parentRef}::${depRef}::${field}::${scopeKey}`;
 
     if (!map.has(key)) {
       map.set(key, { ...a });

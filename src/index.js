@@ -37,3 +37,8 @@ export {
   AnomalyType,
   AnomalySeverity,
 } from './anomalyDetector.js';
+export {
+  compareInventories,
+  ComparisonStatus,
+  ChangeType,
+} from './dependencyComparison.js';
