@@ -30,3 +30,10 @@ export {
   checkVulnerabilities,
   extractEligiblePackages,
 } from './vulnerabilityChecker.js';
+export {
+  detectAnomalies,
+  summarizeAnomalies,
+  parsePurl,
+  AnomalyType,
+  AnomalySeverity,
+} from './anomalyDetector.js';
