@@ -29,6 +29,8 @@ A lightweight, reusable JavaScript engine and tool for generating Software Bill 
 │   ├── vulnerabilityMatcher.js # SemVer comparison & OSV range evaluation
 │   ├── vulnerabilityFindings.js # Finding normalization, severity, & deduplication
 │   ├── vulnerabilityChecker.js # Vulnerability pipeline orchestration
+│   ├── anomalyDetector.js     # SBOM metadata and dependency graph anomaly detection
+│   ├── dependencyComparison.js # Standalone two-SBOM inventory diff & change classifier
 │   └── cli.js                 # Command-line interface
 └── test/
     ├── engine.test.js         # Engine entry point tests
@@ -43,6 +45,8 @@ A lightweight, reusable JavaScript engine and tool for generating Software Bill 
     ├── vulnerabilityMatcher.test.js # Version matching & range evaluation tests
     ├── vulnerabilityFindings.test.js # Finding normalization & deduplication tests
     ├── vulnerabilityIntegration.test.js # End-to-end vulnerability pipeline tests
+    ├── anomalyDetector.test.js # SBOM anomaly detection unit & integration tests
+    ├── dependencyComparison.test.js # SBOM inventory comparison tests
     └── integration.test.js    # Full pipeline and CLI integration tests (37 scenarios)
 ```
 
@@ -74,6 +78,8 @@ npm install
 - **`npm run test:matcher`**: Runs unit tests for semantic version matching and range evaluation.
 - **`npm run test:findings`**: Runs unit tests for finding extraction and deduplication.
 - **`npm run test:vuln`**: Runs comprehensive integration tests for vulnerability detection.
+- **`npm run test:anomaly`**: Runs unit and integration tests for SBOM anomaly detection.
+- **`npm run test:compare`**: Runs unit tests for SBOM dependency inventory comparison.
 - **`npm run scan <path>`**: Runs the CLI scanner against a specified target project path.
 - **`npm run check`**: Runs syntax validation checks across all source files using `node --check`.
 
@@ -312,4 +318,71 @@ Vulnerability API failures are completely isolated from SBOM generation. Even if
 - Only npm ecosystem advisories are evaluated.
 - Advisories without SEMVER ranges (e.g. pure Git commit SHAs without version tags) cannot be evaluated against installed npm versions.
 - Vulnerability analysis requires a complete scan with a valid lockfile; partial scans (manifest-only) skip vulnerability detection.
+
+## Anomaly Detection
+
+`detectAnomalies()` inspects a CycloneDX SBOM or scanner result to identify missing/invalid metadata (names, SemVer versions, PURLs, external references) and dependency graph issues (unresolved references, orphan components, duplicate `bom-ref`s, duplicate edges, self-references).
+
+```javascript
+import { detectAnomalies } from 'npm-sbom-tool';
+
+const { anomalies, summary } = detectAnomalies(result.bom, { summary: true });
+```
+
+For full details on anomaly types, severity levels, and options, see the [Anomaly Detection Specification](docs/anomaly-detection.md).
+
+## Dependency Comparison
+
+The `dependencyComparison` module compares two SBOM inventories (`previousBom` vs `currentBom`) and classifies dependency changes into **added**, **removed**, **changed** (upgrades, downgrades, metadata changes, non-comparable version changes), and **unchanged** components.
+
+### Usage
+
+```javascript
+import { compareInventories, scanProject } from 'npm-sbom-tool';
+
+const previous = await scanProject('./v1-project');
+const current = await scanProject('./v2-project');
+
+const comparison = compareInventories(previous.bom, current.bom);
+
+console.log(comparison.status);  // 'completed' | 'failed'
+console.log(comparison.summary); // { added, removed, changed, unchanged }
+console.log(comparison.changed); // Detailed upgrade, downgrade, and metadata diffs
+```
+
+### Accepted Inputs & Output Structure
+
+- **Expected Inputs**: Any pair of CycloneDX BOM objects (`bomFormat: 'CycloneDX'`, `metadata`, or `components` array) or internal `scanProject()` results. Root application entries (`metadata.component` / `isRoot: true`) are excluded by default so empty dependency inventories yield zero counts; pass `{ includeRoot: true }` to include them when comparing `scanResult` objects.
+- **Output Shape**:
+  ```javascript
+  {
+    status: 'completed' | 'failed',
+    summary: { added: 0, removed: 0, changed: 0, unchanged: 0 },
+    added: [],
+    removed: [],
+    changed: [],
+    unchanged: [],
+    errors: [],
+    warnings: []
+  }
+  ```
+
+### Change Classifications
+
+- **`added`**: Present in `currentBom` and absent in `previousBom`.
+- **`removed`**: Present in `previousBom` and absent in `currentBom`.
+- **`upgrade`**: Matched package whose `currentVersion` is strictly greater than `previousVersion` according to SemVer 2.0.0.
+- **`downgrade`**: Matched package whose `currentVersion` is strictly less than `previousVersion` according to SemVer 2.0.0.
+- **`metadata-changed`**: Version is unchanged (or SemVer-equivalent), while identifiers or metadata (`purl`, `bomRef`, `hashes`, `externalReferences`, `licenses`, `type`, `isFirstParty`) changed.
+- **`version-changed`**: Versions differ, but one is missing or non-SemVer (e.g. Git URLs or tags), so neither upgrade nor downgrade is invented.
+- **`unchanged`**: Matched package with identical version and metadata.
+
+### Matching Strategy & Limitations
+
+- Components are matched across inventories using a **versionless canonical identity** (`<ecosystem>:<fullName>`), preferring a valid parsed PURL first and falling back to `<ecosystem>:<group/name>` or `<ecosystem>:<name>`. This ensures upgrades/downgrades are paired cleanly rather than reported as a removal plus an addition.
+- Multi-version packages (e.g. `shared-dep@1.5.0` and `shared-dep@2.0.0`) are paired in deterministic passes: exact version + metadata matches first, then same-version matches, then matching `bom-ref`, then positional pairing.
+- **Limitations**: Non-SemVer version strings cannot be ordered as upgrades or downgrades (`version-changed` + warning emitted); components missing both a valid PURL and a package `name` are skipped with an `UNRESOLVABLE_COMPONENT_IDENTITY` warning; package renames (name changes) appear as a removal plus an addition.
+
+For the complete specification, see [Dependency Comparison Specification](docs/dependency-comparison.md).
+
 
