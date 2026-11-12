@@ -631,6 +631,40 @@ function checkDependencyRelationships(dependencies, knownBomRefs, rootBomRef, co
 }
 
 /**
+ * Impact statements explaining why each anomaly type matters.
+ */
+const ANOMALY_IMPACT = Object.freeze({
+  [AnomalyType.MISSING_NAME]: 'Components without names cannot be tracked, audited, or cross-referenced against vulnerability databases.',
+  [AnomalyType.MISSING_VERSION]: 'Omitted versions prevent precise dependency tracking and inhibit accurate vulnerability matching.',
+  [AnomalyType.INVALID_VERSION]: 'Non-standard versioning violates SemVer 2.0.0 rules, impairing version comparisons and range-based security checks.',
+  [AnomalyType.MISSING_PURL]: 'Missing Package URLs impede standard cross-ecosystem package identification and automated SBOM ingestion.',
+  [AnomalyType.INVALID_PURL]: 'Malformed Package URLs prevent downstream tooling from querying package registries and vulnerability databases.',
+  [AnomalyType.INCONSISTENT_PURL]: 'Conflicting PURL attributes and component metadata create supply-chain ambiguity and can cause incorrect dependency resolution.',
+  [AnomalyType.MISSING_REFERENCES]: 'Absence of external distribution or repository links hinders component provenance verification.',
+  [AnomalyType.UNRESOLVED_DEPENDENCY]: 'Dangling dependency references violate graph referential integrity and indicate incomplete SBOM data.',
+  [AnomalyType.MISSING_DEPENDENCY_RELATIONSHIP]: 'Orphan components without graph edges obscure dependency provenance and application call-chains.',
+  [AnomalyType.INVALID_DEPENDENCY_REFERENCE]: 'Malformed dependency references break dependency graph traversal and SBOM validation.',
+  [AnomalyType.DUPLICATE_BOM_REF]: 'Duplicate component identifiers violate CycloneDX uniqueness requirements and introduce ambiguity into the dependency graph.',
+  [AnomalyType.DUPLICATE_DEPENDENCY_EDGE]: 'Redundant dependency edges introduce noise and may distort dependency depth and traversal calculations.',
+  [AnomalyType.SELF_REFERENCING_DEPENDENCY]: 'Circular self-references can cause infinite recursion during dependency resolution and graph traversal.',
+});
+
+/**
+ * Creates an explanation string covering why the component was flagged,
+ * what inconsistency was detected, and why the finding matters.
+ *
+ * @param {object} item
+ * @returns {string}
+ */
+export function createAnomalyExplanation(item) {
+  const compName = item.affectedComponent?.name || item.component?.name || item.affectedComponent?.bomRef || item.component?.bomRef || 'Component';
+  const reason = item.message || 'An anomaly was detected.';
+  const details = item.details || '';
+  const impact = (item.type && ANOMALY_IMPACT[item.type]) || 'This inconsistency may impact SBOM reliability and security analysis.';
+  return `${compName} was flagged: ${reason} ${details} Why this matters: ${impact}`;
+}
+
+/**
  * Deduplicates anomaly records based on a stable identity key:
  * type + component.bomRef + parentRef + dependencyRef + field
  *
@@ -679,9 +713,13 @@ function deduplicateAnomalies(anomalies) {
   // Assign sequential deterministic anomaly IDs (e.g. ANOMALY-001)
   return list.map((item, index) => {
     const id = `ANOMALY-${String(index + 1).padStart(3, '0')}`;
+    const affectedComponent = item.affectedComponent || item.component || null;
+    const explanation = item.explanation || createAnomalyExplanation(item);
     return {
       id,
       ...item,
+      affectedComponent,
+      explanation,
     };
   });
 }

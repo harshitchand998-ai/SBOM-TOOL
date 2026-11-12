@@ -23,6 +23,7 @@
     "test:vuln": "node --test test/vulnerabilityIntegration.test.js",
     "test:anomaly": "node --test test/anomalyDetector.test.js",
     "test:compare": "node --test test/dependencyComparison.test.js",
+    "test:order16": "node --test test/anomalyComparison.integration.test.js",
     "scan": "node src/cli.js scan",
     "check": "node --check src/index.js src/engine/index.js src/scanner/index.js src/cli.js src/errors.js src/fileDiscovery.js src/parser.js src/dependencyResolver.js src/dependencyGraph.js src/workspaceDiscovery.js src/cyclonedxGenerator.js src/validator.js src/osvClient.js src/vulnerabilityMatcher.js src/vulnerabilityFindings.js src/vulnerabilityChecker.js src/anomalyDetector.js src/dependencyComparison.js"
   },

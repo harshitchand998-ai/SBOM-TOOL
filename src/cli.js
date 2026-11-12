@@ -23,7 +23,7 @@ function printUsage() {
 npm-sbom-tool — Software Bill of Materials Scanner
 
 Usage:
-  node src/cli.js scan <project-path> [--output <output-path>] [--vulnerabilities]
+  node src/cli.js scan <project-path> [--output <output-path>] [--vulnerabilities] [--previous-sbom <path>]
 
 Commands:
   scan    Scan an npm project and generate a CycloneDX SBOM.
@@ -32,11 +32,13 @@ Options:
   --output, -o          Output file path for the generated SBOM.
                         Default: ./sbom-output.cdx.json
   --vulnerabilities, -v Enable OSV vulnerability analysis for discovered dependencies.
+  --previous-sbom       Path to a previous CycloneDX SBOM JSON file for dependency comparison.
 
 Examples:
   node src/cli.js scan ./my-application
   node src/cli.js scan /Users/user/projects/app --output ./bom.json
   node src/cli.js scan ./my-application --vulnerabilities
+  node src/cli.js scan ./my-application --previous-sbom ./old-bom.cdx.json
   node src/cli.js scan "./path with spaces/project"
 `);
 }
@@ -64,6 +66,7 @@ async function main() {
   const projectPath = args[1];
   let outputPath = './sbom-output.cdx.json';
   let checkVulns = false;
+  let previousSbomPath = null;
 
   // Parse optional arguments
   for (let i = 2; i < args.length; i++) {
@@ -76,13 +79,32 @@ async function main() {
       i++; // skip the value
     } else if (args[i] === '--vulnerabilities' || args[i] === '-v') {
       checkVulns = true;
+    } else if (args[i] === '--previous-sbom') {
+      if (i + 1 >= args.length) {
+        console.error('Error: --previous-sbom requires a file path argument.');
+        process.exit(1);
+      }
+      previousSbomPath = args[i + 1];
+      i++;
     }
   }
 
   console.log(`Scanning project: ${path.resolve(projectPath)}`);
   console.log();
 
-  const result = await scanProject(projectPath, { vulnerabilities: checkVulns });
+  const scanOptions = { vulnerabilities: checkVulns };
+
+  if (previousSbomPath) {
+    try {
+      const prevContent = fs.readFileSync(path.resolve(previousSbomPath), 'utf-8');
+      scanOptions.previousBom = JSON.parse(prevContent);
+    } catch (err) {
+      console.error(`Error reading previous SBOM: ${err.message}`);
+      process.exit(1);
+    }
+  }
+
+  const result = await scanProject(projectPath, scanOptions);
 
   // Report scan status
   console.log(`Scan status: ${result.status}`);
@@ -175,6 +197,38 @@ async function main() {
         console.log();
       }
     }
+  }
+
+  // Report anomaly detection results
+  if (result.anomalies) {
+    console.log('--- Anomaly Detection ---');
+    const a = result.anomalies;
+    console.log(`Total anomalies: ${a.summary.total} (error: ${a.summary.bySeverity.error}, warning: ${a.summary.bySeverity.warning}, info: ${a.summary.bySeverity.info})`);
+    if (a.findings.length > 0) {
+      for (const f of a.findings) {
+        const compName = f.component?.name || f.component?.bomRef || 'unknown';
+        console.log(`  ${f.severity === 'error' ? '✗' : f.severity === 'warning' ? '⚠' : 'ℹ'} [${f.type}] ${compName}: ${f.message}`);
+      }
+    }
+    console.log();
+  }
+
+  // Report dependency comparison results
+  if (result.comparison) {
+    console.log('--- Dependency Comparison ---');
+    const c = result.comparison;
+    console.log(`Status: ${c.status}`);
+    console.log(`Added: ${c.summary.added}, Removed: ${c.summary.removed}, Changed: ${c.summary.changed}, Unchanged: ${c.summary.unchanged}`);
+    for (const item of c.added) {
+      console.log(`  + ${item.explanation}`);
+    }
+    for (const item of c.removed) {
+      console.log(`  - ${item.explanation}`);
+    }
+    for (const item of c.changed) {
+      console.log(`  ~ ${item.explanation}`);
+    }
+    console.log();
   }
 
   // Write output
