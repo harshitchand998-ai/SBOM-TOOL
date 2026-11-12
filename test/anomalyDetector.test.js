@@ -14,6 +14,7 @@ import {
   AnomalyType,
   AnomalySeverity,
 } from '../src/anomalyDetector.js';
+import { scanProject } from '../src/scanner/index.js';
 
 describe('Anomaly Detector', () => {
 
@@ -642,6 +643,208 @@ describe('Anomaly Detector', () => {
 
       const standaloneSummary = summarizeAnomalies(result.anomalies);
       assert.deepEqual(standaloneSummary, result.summary);
+    });
+  });
+
+  describe('Audit Edge Cases & Integration', () => {
+    it('handles malformed percent-encoding in PURL safely without crashing', () => {
+      assert.equal(parsePurl('pkg:npm/%ZZinvalid@1.0.0'), null);
+      assert.equal(parsePurl('pkg:npm/%E0%A4%A/pkg@1.0.0'), null);
+
+      const parsedBuild = parsePurl('pkg:npm/pkg@1.0.0%2Bbuild.1');
+      assert.ok(parsedBuild);
+      assert.equal(parsedBuild.version, '1.0.0+build.1');
+
+      const sbom = {
+        bomFormat: 'CycloneDX',
+        specVersion: '1.7',
+        components: [
+          {
+            type: 'library',
+            name: 'bad-pct',
+            version: '1.0.0',
+            'bom-ref': 'ref-bad-pct',
+            purl: 'pkg:npm/%ZZbad@1.0.0',
+            externalReferences: [{ type: 'distribution', url: 'https://example.com' }],
+          },
+        ],
+      };
+
+      const anomalies = detectAnomalies(sbom);
+      assert.ok(anomalies.some(a => a.type === AnomalyType.INVALID_PURL && a.component.name === 'bad-pct'));
+    });
+
+    it('detects PURL namespace mismatch on unscoped components while supporting group metadata', () => {
+      const sbom = {
+        bomFormat: 'CycloneDX',
+        specVersion: '1.7',
+        metadata: {
+          component: { type: 'application', name: 'app', version: '1.0.0', 'bom-ref': 'app', purl: 'pkg:npm/app@1.0.0' },
+        },
+        components: [
+          {
+            type: 'library',
+            name: 'lodash',
+            version: '4.17.21',
+            'bom-ref': 'ref-spoofed',
+            purl: 'pkg:npm/%40evil/lodash@4.17.21',
+            externalReferences: [{ type: 'distribution', url: 'https://example.com' }],
+          },
+          {
+            type: 'library',
+            group: '@babel',
+            name: 'core',
+            version: '7.20.0',
+            'bom-ref': 'ref-grouped',
+            purl: 'pkg:npm/%40babel/core@7.20.0',
+            externalReferences: [{ type: 'distribution', url: 'https://example.com' }],
+          },
+        ],
+        dependencies: [
+          { ref: 'app', dependsOn: ['ref-spoofed', 'ref-grouped'] },
+        ],
+      };
+
+      const anomalies = detectAnomalies(sbom);
+      const inconsistent = anomalies.filter(a => a.type === AnomalyType.INCONSISTENT_PURL);
+      assert.equal(inconsistent.length, 1);
+      assert.equal(inconsistent[0].component.bomRef, 'ref-spoofed');
+      assert.equal(inconsistent[0].field, 'purl.name');
+    });
+
+    it('preserves per-component metadata anomalies across multiple unnamed or unreferenced components', () => {
+      const sbom = {
+        bomFormat: 'CycloneDX',
+        specVersion: '1.7',
+        components: [
+          { type: 'library', name: '', version: '1.0.0' },
+          { type: 'library', name: '', version: '2.0.0' },
+        ],
+      };
+
+      const anomalies = detectAnomalies(sbom);
+      const missingName = anomalies.filter(a => a.type === AnomalyType.MISSING_NAME);
+      assert.equal(missingName.length, 2, 'Both components missing name must be reported individually');
+      assert.notEqual(missingName[0].source, missingName[1].source);
+    });
+
+    it('processes scanProject() scanResult without false-positive MISSING_DEPENDENCY_RELATIONSHIP warnings', async () => {
+      const scanResult = await scanProject('./fixtures/simple-project');
+      const result = detectAnomalies(scanResult, { summary: true });
+
+      assert.equal(result.summary.total, 0);
+      assert.deepEqual(result.anomalies, []);
+    });
+
+    it('does not flag first-party workspace library components with MISSING_REFERENCES', () => {
+      const sbom = {
+        bomFormat: 'CycloneDX',
+        specVersion: '1.7',
+        metadata: {
+          component: { type: 'application', name: 'root', version: '1.0.0', 'bom-ref': 'root', purl: 'pkg:npm/root@1.0.0' },
+        },
+        components: [
+          {
+            type: 'library',
+            name: '@ws/local-lib',
+            version: '1.0.0',
+            isFirstParty: true,
+            dependencyType: 'workspace',
+            'bom-ref': 'pkg:npm/%40ws/local-lib@1.0.0',
+            purl: 'pkg:npm/%40ws/local-lib@1.0.0',
+          },
+        ],
+        dependencies: [
+          { ref: 'root', dependsOn: ['pkg:npm/%40ws/local-lib@1.0.0'] },
+        ],
+      };
+
+      const anomalies = detectAnomalies(sbom);
+      assert.equal(anomalies.filter(a => a.type === AnomalyType.MISSING_REFERENCES).length, 0);
+      assert.equal(anomalies.length, 0);
+    });
+
+    it('respects requirePurl, checkReferences, and allowRootWithoutVersion options', () => {
+      const sbom = {
+        bomFormat: 'CycloneDX',
+        specVersion: '1.7',
+        metadata: {
+          component: { type: 'application', name: 'root', 'bom-ref': 'root' },
+        },
+        components: [
+          { type: 'library', name: 'pkg-a', version: '1.0.0', 'bom-ref': 'pkg-a' },
+        ],
+        dependencies: [
+          { ref: 'root', dependsOn: ['pkg-a'] },
+        ],
+      };
+
+      const anomalies = detectAnomalies(sbom, {
+        requirePurl: false,
+        checkReferences: false,
+        allowRootWithoutVersion: true,
+      });
+
+      assert.equal(anomalies.length, 0);
+    });
+
+    it('does not treat valid non-npm PURL components as npm or report false INCONSISTENT_PURL/INVALID_VERSION', () => {
+      const sbom = {
+        bomFormat: 'CycloneDX',
+        specVersion: '1.7',
+        metadata: {
+          component: { type: 'application', name: 'polyglot-app', version: '1.0.0', 'bom-ref': 'root', purl: 'pkg:generic/polyglot-app@1.0.0' },
+        },
+        components: [
+          {
+            type: 'library',
+            name: 'requests',
+            version: '2.28.0.post1',
+            'bom-ref': 'pkg:pypi/requests@2.28.0.post1',
+            purl: 'pkg:pypi/requests@2.28.0.post1',
+            externalReferences: [{ type: 'distribution', url: 'https://pypi.org/project/requests/' }],
+          },
+          {
+            type: 'library',
+            name: 'openssl',
+            version: '1.1.1k',
+            'bom-ref': 'pkg:generic/openssl@1.1.1k',
+            purl: 'pkg:generic/openssl@1.1.1k',
+            externalReferences: [{ type: 'website', url: 'https://www.openssl.org' }],
+          },
+        ],
+        dependencies: [
+          { ref: 'root', dependsOn: ['pkg:pypi/requests@2.28.0.post1', 'pkg:generic/openssl@1.1.1k'] },
+        ],
+      };
+
+      const anomalies = detectAnomalies(sbom);
+      assert.equal(anomalies.length, 0);
+    });
+
+    it('handles workspace-with-lockfile-project scanResult with zero false-positive anomalies', async () => {
+      const scanResult = await scanProject('./fixtures/workspace-with-lockfile-project');
+      const result = detectAnomalies(scanResult, { summary: true });
+
+      assert.equal(result.summary.total, 0);
+      assert.deepEqual(result.anomalies, []);
+    });
+
+    it('reports all colliding DUPLICATE_BOM_REF components individually when three share the same bom-ref', () => {
+      const sbom = {
+        bomFormat: 'CycloneDX',
+        specVersion: '1.7',
+        components: [
+          { type: 'library', name: 'p1', version: '1.0.0', 'bom-ref': 'shared-ref', purl: 'pkg:npm/p1@1.0.0' },
+          { type: 'library', name: 'p2', version: '1.0.0', 'bom-ref': 'shared-ref', purl: 'pkg:npm/p2@1.0.0' },
+          { type: 'library', name: 'p3', version: '1.0.0', 'bom-ref': 'shared-ref', purl: 'pkg:npm/p3@1.0.0' },
+        ],
+      };
+
+      const anomalies = detectAnomalies(sbom);
+      const dupRefs = anomalies.filter(a => a.type === AnomalyType.DUPLICATE_BOM_REF);
+      assert.equal(dupRefs.length, 2);
+      assert.deepEqual(dupRefs.map(a => a.component.name).sort(), ['p2', 'p3']);
     });
   });
 });
