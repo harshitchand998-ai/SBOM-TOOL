@@ -457,3 +457,42 @@ interface VulnerabilityFinding {
 ### Incomplete or Invalid SBOM Behavior
 If the base scan produces a `'partial'` or `'failed'` status (e.g. missing lockfile or invalid project), vulnerability analysis is automatically skipped and `result.vulnerabilities` is set to `null`.
 
+---
+
+## 11. Anomaly Detection and Dependency Comparison Contract
+
+### Anomaly Detection Pipeline (`result.anomalies`)
+- Automatically executed on complete scans with a valid CycloneDX SBOM when `options.anomalies !== false`.
+- Structured findings provide `type`, `severity`, `affectedComponent`, and human-readable `explanation` detailing:
+  1. Why the component was flagged
+  2. What inconsistency or unusual behavior was detected
+  3. Why the finding matters
+- Failure in anomaly analysis is non-fatal: errors are captured as non-fatal warnings, `result.anomalies` is set to `null`, and the SBOM remains 100% valid.
+- Anomalies remain strictly separated from security vulnerabilities (`result.vulnerabilities`).
+
+### Dependency Comparison Pipeline (`result.comparison`)
+- Accepts a previous SBOM through `options.previousBom` or `options.previousSbom` (as a parsed object, raw JSON string, or filesystem path).
+- Requires a complete scan with a valid CycloneDX SBOM. Comparison is never performed using incomplete or partial scan data.
+- Accurately classifies dependency changes into `added`, `removed`, `changed` (`upgrade`, `downgrade`, `metadata-changed`, `version-changed`), and `unchanged` with human-readable explanations.
+- Missing or malformed previous SBOM files emit actionable warnings without failing the scan or invalidating the current SBOM.
+
+---
+
+## 12. Engine Architecture and Full-Scan Output Contract
+
+### Engine Command Mapping
+The CLI functions as a thin interface over the core engine APIs (`src/engine/index.js`):
+- `executeScan(projectPath, options)`: Coordinates the end-to-end scanning pipeline, supporting `--full`, `--vulnerabilities`, `--anomalies`, and `--previous-sbom`.
+- `executeSbom(projectPath, options)`: Generates a valid CycloneDX 1.7 JSON SBOM without running vulnerability or anomaly detection overhead.
+- `executeAudit(projectPath, options)`: Runs security vulnerability analysis and anomaly detection, outputting structured findings and handling differential SBOM comparisons.
+- `buildCombinedReport(scanResult, options)`: Synthesizes scan metadata, project info, SBOM inventory, validation status, vulnerabilities, anomalies, and comparisons into a unified executive report.
+- `writeMultiFileOutput(outputDir, scanResult, options)`: Generates standard multi-file reports into the target directory (`sbom.json`, `vulnerabilities.json`, `anomalies.json`, `report.json`).
+
+### Multi-File Report Structure (`--full`)
+```text
+output/
+├── sbom.json             # Pure CycloneDX 1.7 JSON SBOM
+├── vulnerabilities.json  # OSV vulnerability findings and package metrics
+├── anomalies.json        # Component and graph anomalies with explanations
+└── report.json           # Unified executive scan and security report
+```

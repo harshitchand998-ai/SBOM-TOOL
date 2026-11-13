@@ -192,6 +192,12 @@ The `scan` command inspects an npm project directory, discovers manifests and lo
 # Basic scan of the current directory
 sbom-tool scan .
 
+# Complete full-pipeline scan (SBOM, validation, vulnerabilities, anomalies, and comparison)
+sbom-tool scan ./my-application --full
+
+# Complete scan writing reports to custom output directory
+sbom-tool scan ./my-application --full --output-dir ./reports
+
 # Scan a target project directory
 sbom-tool scan ./my-application
 
@@ -207,14 +213,20 @@ sbom-tool scan ./my-application --vulnerabilities
 # Scan and compare dependency inventory against a previous CycloneDX SBOM
 sbom-tool scan ./my-application --previous-sbom ./prev-bom.cdx.json
 
+# Complete full scan with previous SBOM comparison
+sbom-tool scan ./my-application --full --previous-sbom ./prev-bom.cdx.json
+
 # Display scan-specific options
 sbom-tool scan --help
 ```
 
 Supported options:
-- `--output, -o <path>`: Write scan report (or generated SBOM) to file.
-- `--json`: Output structured scan results in JSON format to stdout.
+- `--full`: Perform a complete full-pipeline scan: dependency discovery, CycloneDX SBOM generation, structural validation, OSV vulnerability detection, anomaly detection, and dependency comparison (when `--previous-sbom` is supplied). Generates a multi-file report directory (`output/`).
+- `--output, -o <path>`: Write scan report (or generated SBOM) to file, or output directory when used with `--full`.
+- `--output-dir <path>`: Destination directory for multi-file report structure (`sbom.json`, `vulnerabilities.json`, `anomalies.json`, `report.json`).
+- `--json`: Output structured scan results (or combined report when `--full` is used) in JSON format to stdout.
 - `--vulnerabilities, -v`: Enable OSV vulnerability analysis for discovered dependencies.
+- `--anomalies, -a`: Enable anomaly detection explicitly.
 - `--previous-sbom <path>`: Path to a previous CycloneDX SBOM JSON file for dependency comparison.
 - `--help, -h`: Show scan command help.
 
@@ -282,6 +294,9 @@ sbom-tool audit ./my-application --anomaly
 # Run both analyses explicitly
 sbom-tool audit ./my-application --vuln --anomaly
 
+# Run audit with inventory comparison against a previous CycloneDX SBOM
+sbom-tool audit ./my-application --previous-sbom ./prev-bom.cdx.json
+
 # Save structured audit report to a JSON file
 sbom-tool audit ./my-application --output ./audit-report.json
 
@@ -295,6 +310,7 @@ sbom-tool audit --help
 Supported options:
 - `--vuln, -v`: Perform vulnerability analysis only (or explicitly).
 - `--anomaly, -a`: Perform anomaly analysis only (or explicitly).
+- `--previous-sbom <path>`: Path to a previous CycloneDX SBOM JSON file for dependency comparison.
 - `--output, -o <path>`: Output file path for the structured audit report JSON.
 - `--json`: Output structured audit report JSON directly to stdout.
 - `--help, -h`: Show audit command help.
@@ -330,7 +346,97 @@ Audit completed (Status: completed).
 
 ---
 
-### 5. Error Handling & Exit Codes
+### 5. Full-Pipeline Multi-File Report Structure (`--full`)
+
+When running `sbom-tool scan ./my-project --full`, the tool runs all supported scanning and security features in a single automated step:
+1. Manifest parsing and dependency graph resolution
+2. First-party workspace package discovery
+3. CycloneDX 1.7 JSON SBOM generation
+4. Built-in structural SBOM validation
+5. OSV API vulnerability analysis for third-party packages
+6. Component metadata and graph anomaly detection
+7. Dependency comparison (when `--previous-sbom <path>` is provided)
+
+#### Output Files
+
+By default, the `--full` option outputs a structured report directory (default `./output/` or configurable via `--output-dir <path>` or `--output <dir>`):
+
+```text
+output/
+├── sbom.json             # Pure CycloneDX 1.7 JSON Software Bill of Materials
+├── vulnerabilities.json  # Structured OSV vulnerability findings and package metrics
+├── anomalies.json        # Component and graph anomaly findings with explanations
+└── report.json           # Comprehensive combined scan and security report
+```
+
+#### File Roles and Contents
+
+| Output File | Format | Description |
+|---|---|---|
+| `sbom.json` | CycloneDX 1.7 JSON | Pure industry-standard SBOM containing `metadata.component` (root application), `components` (libraries & workspaces), and `dependencies` (referential graph edges). Only emitted on complete, structurally valid scans. |
+| `vulnerabilities.json` | JSON | Structured findings for known CVEs/GHSAs, affected SemVer ranges, fixed versions, CVSS severities, and scan metrics. Clearly records `'skipped'` if analysis was not executed or not possible. |
+| `anomalies.json` | JSON | Structured findings for invalid SemVer versions, missing/malformed PURLs, dangling graph references, and duplicate `bom-ref`s with human-readable impact explanations. |
+| `report.json` | JSON | Unified executive scan report combining scan metadata, project info, SBOM inventory summary, validation results, vulnerability findings, anomaly findings, comparison findings (if requested), and overall status. |
+
+#### Combined Report Schema (`report.json`)
+
+```json
+{
+  "scan": {
+    "tool": "npm-sbom-tool",
+    "version": "0.1.0",
+    "timestamp": "2026-11-13T23:45:00.000Z",
+    "projectPath": "/path/to/my-application",
+    "status": "complete"
+  },
+  "project": {
+    "name": "my-application",
+    "version": "1.0.0",
+    "path": "/path/to/my-application"
+  },
+  "sbom": {
+    "format": "CycloneDX",
+    "specVersion": "1.7",
+    "serialNumber": "urn:uuid:...",
+    "version": 1,
+    "componentsCount": 25,
+    "dependenciesCount": 25,
+    "summary": {
+      "totalComponents": 25,
+      "directDependencies": 8,
+      "transitiveDependencies": 17,
+      "workspacePackages": 2
+    }
+  },
+  "validation": {
+    "valid": true,
+    "errors": [],
+    "warnings": []
+  },
+  "vulnerabilities": {
+    "status": "completed",
+    "scannedPackages": 25,
+    "totalPackages": 25,
+    "vulnerablePackages": 2,
+    "summary": { "total": 2, "critical": 0, "high": 1, "medium": 1, "low": 0, "unknown": 0 },
+    "findings": [ ... ]
+  },
+  "anomalies": {
+    "status": "completed",
+    "total": 1,
+    "summary": { "total": 1, "bySeverity": { "error": 0, "warning": 1, "info": 0 }, "byType": { "MISSING_PURL": 1 } },
+    "findings": [ ... ]
+  },
+  "comparison": null,
+  "errors": [],
+  "warnings": [],
+  "status": "complete"
+}
+```
+
+---
+
+### 6. Error Handling & Exit Codes
 
 The CLI returns standard, meaningful process exit codes:
 
@@ -604,4 +710,42 @@ console.log(comparison.changed); // Detailed upgrade, downgrade, and metadata di
 
 For the complete specification, see [Dependency Comparison Specification](docs/dependency-comparison.md).
 
+## Programmatic Engine API
 
+The `npm-sbom-tool` package exposes unified programmatic entry points connecting directly to the engine and scanner pipeline:
+
+```javascript
+import {
+  executeScan,
+  executeSbom,
+  executeAudit,
+  buildCombinedReport,
+  writeMultiFileOutput,
+  scanProject,
+  compareInventories,
+  detectAnomalies,
+  validateStructure,
+} from 'npm-sbom-tool';
+
+// 1. Complete scan with full analysis features
+const scanResult = await executeScan('./my-project', { full: true });
+
+// 2. Pure CycloneDX SBOM generation without security overhead
+const sbomResult = await executeSbom('./my-project');
+if (sbomResult.success) {
+  console.log('CycloneDX 1.7 SBOM:', sbomResult.bom);
+}
+
+// 3. Security vulnerability and anomaly audit
+const auditReport = await executeAudit('./my-project', {
+  vuln: true,
+  anomaly: true,
+  previousSbom: './prev-bom.cdx.json',
+});
+
+// 4. Build comprehensive combined report object
+const report = buildCombinedReport(scanResult);
+
+// 5. Write standard multi-file report directory (sbom.json, vulnerabilities.json, anomalies.json, report.json)
+writeMultiFileOutput('./output', scanResult);
+```
