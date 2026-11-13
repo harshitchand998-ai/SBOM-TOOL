@@ -12,6 +12,21 @@ const __dirname = path.dirname(__filename);
 const cliScriptPath = path.join(__dirname, '..', 'src', 'cli.js');
 const fixturesDir = path.join(__dirname, '..', 'fixtures');
 
+// Temporary directory for mock loaders
+const tempLoaderDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-test-loaders-'));
+const defaultMockLoaderPath = path.join(tempLoaderDir, 'defaultMockLoader.js');
+
+// Mock loader that returns empty vulnerabilities (safe offline query)
+fs.writeFileSync(
+  defaultMockLoaderPath,
+  `globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ vulns: [] })
+  });`,
+  'utf8'
+);
+
 describe('CLI Commands Integration Suite', () => {
 
   // ==========================================
@@ -247,6 +262,178 @@ describe('CLI Commands Integration Suite', () => {
         });
       }, (err) => {
         assert.equal(err.status, 1);
+        return true;
+      });
+    });
+  });
+
+  // ==========================================
+  // 3. Audit Command Tests
+  // ==========================================
+  describe('Command: audit', () => {
+    it('runs both vulnerability and anomaly audit by default and prints summary', () => {
+      const fixturePath = path.join(fixturesDir, 'simple-project');
+      const stdout = execFileSync(
+        process.execPath,
+        ['--import', `file://${defaultMockLoaderPath}`, cliScriptPath, 'audit', fixturePath],
+        { encoding: 'utf8' }
+      );
+
+      assert.ok(stdout.includes('Security Audit'));
+      assert.ok(stdout.includes('Project: simple-project@1.0.0'));
+      assert.ok(stdout.includes('Dependencies scanned: 2'));
+      assert.ok(stdout.includes('--- Vulnerabilities ---'));
+      assert.ok(stdout.includes('--- Anomalies ---'));
+      assert.ok(stdout.includes('Audit completed'));
+    });
+
+    it('runs only vulnerability analysis when --vuln is specified', () => {
+      const fixturePath = path.join(fixturesDir, 'simple-project');
+      const stdout = execFileSync(
+        process.execPath,
+        ['--import', `file://${defaultMockLoaderPath}`, cliScriptPath, 'audit', fixturePath, '--vuln'],
+        { encoding: 'utf8' }
+      );
+
+      assert.ok(stdout.includes('--- Vulnerabilities ---'));
+      assert.equal(stdout.includes('--- Anomalies ---'), false);
+    });
+
+    it('runs only anomaly analysis when --anomaly is specified', () => {
+      const fixturePath = path.join(fixturesDir, 'simple-project');
+      const stdout = execFileSync(process.execPath, [cliScriptPath, 'audit', fixturePath, '--anomaly'], {
+        encoding: 'utf8',
+      });
+
+      assert.equal(stdout.includes('--- Vulnerabilities ---'), false);
+      assert.ok(stdout.includes('--- Anomalies ---'));
+    });
+
+    it('runs both explicitly when both --vuln and --anomaly are passed', () => {
+      const fixturePath = path.join(fixturesDir, 'simple-project');
+      const stdout = execFileSync(
+        process.execPath,
+        ['--import', `file://${defaultMockLoaderPath}`, cliScriptPath, 'audit', fixturePath, '-v', '-a'],
+        { encoding: 'utf8' }
+      );
+
+      assert.ok(stdout.includes('--- Vulnerabilities ---'));
+      assert.ok(stdout.includes('--- Anomalies ---'));
+    });
+
+    it('outputs structured JSON audit report to stdout with --json', () => {
+      const fixturePath = path.join(fixturesDir, 'simple-project');
+      const stdout = execFileSync(
+        process.execPath,
+        ['--import', `file://${defaultMockLoaderPath}`, cliScriptPath, 'audit', fixturePath, '--json'],
+        { encoding: 'utf8' }
+      );
+
+      const report = JSON.parse(stdout);
+      assert.equal(report.project.name, 'simple-project');
+      assert.equal(report.summary.dependenciesScanned, 2);
+      assert.ok(report.vulnerabilities !== undefined);
+      assert.ok(report.anomalies !== undefined);
+      assert.equal(report.status, 'completed');
+    });
+
+    it('writes audit report to specified file with -o', () => {
+      const fixturePath = path.join(fixturesDir, 'simple-project');
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-audit-file-'));
+      const targetPath = path.join(tmpDir, 'audit-report.json');
+
+      try {
+        const stdout = execFileSync(
+          process.execPath,
+          ['--import', `file://${defaultMockLoaderPath}`, cliScriptPath, 'audit', fixturePath, '-o', targetPath],
+          { encoding: 'utf8' }
+        );
+
+        assert.ok(stdout.includes(`Audit report written to: ${targetPath}`));
+        assert.ok(fs.existsSync(targetPath));
+        const report = JSON.parse(fs.readFileSync(targetPath, 'utf8'));
+        assert.equal(report.project.name, 'simple-project');
+        assert.equal(report.summary.dependenciesScanned, 2);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('handles simulated OSV vulnerability findings accurately', () => {
+      const fixturePath = path.join(fixturesDir, 'simple-project');
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-audit-mock-'));
+
+      const mockLoader = `
+        globalThis.fetch = async () => ({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            vulns: [{
+              id: 'GHSA-test-mock-audit',
+              summary: 'Mock High Vulnerability',
+              severity: [{ type: 'CVSS_V3', score: '7.5' }],
+              affected: [{
+                package: { name: 'is-odd', ecosystem: 'npm' },
+                ranges: [{ type: 'SEMVER', events: [{ introduced: '0' }, { fixed: '4.0.0' }] }]
+              }]
+            }]
+          })
+        });
+      `;
+      const mockLoaderPath = path.join(tmpDir, 'loader.js');
+      fs.writeFileSync(mockLoaderPath, mockLoader, 'utf8');
+
+      try {
+        const stdout = execFileSync(
+          process.execPath,
+          ['--import', `file://${mockLoaderPath}`, cliScriptPath, 'audit', fixturePath, '--vuln'],
+          { encoding: 'utf8' }
+        );
+
+        assert.ok(stdout.includes('Vulnerabilities found:'));
+        assert.ok(stdout.includes('GHSA-test-mock-audit'));
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('handles OSV network query failures gracefully without reporting 0 vulnerabilities falsely', () => {
+      const fixturePath = path.join(fixturesDir, 'simple-project');
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-audit-fail-'));
+
+      const mockFailLoader = `
+        globalThis.fetch = async () => {
+          throw new Error('ENOTFOUND api.osv.dev');
+        };
+      `;
+      const mockFailLoaderPath = path.join(tmpDir, 'failLoader.js');
+      fs.writeFileSync(mockFailLoaderPath, mockFailLoader, 'utf8');
+
+      try {
+        const stdout = execFileSync(
+          process.execPath,
+          ['--import', `file://${mockFailLoaderPath}`, cliScriptPath, 'audit', fixturePath, '--json'],
+          { encoding: 'utf8' }
+        );
+
+        const report = JSON.parse(stdout);
+        assert.equal(report.status, 'failed');
+        assert.equal(report.vulnerabilities.status, 'failed');
+        assert.ok(report.vulnerabilities.errors.length > 0 || report.vulnerabilities.warnings.length > 0);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('fails with code 1 when scanning non-existent project for audit', () => {
+      assert.throws(() => {
+        execFileSync(process.execPath, [cliScriptPath, 'audit', './does-not-exist-project-123'], {
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      }, (err) => {
+        assert.equal(err.status, 1);
+        assert.ok(err.stderr.includes('Project path does not exist'));
         return true;
       });
     });
