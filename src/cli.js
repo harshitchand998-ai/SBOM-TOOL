@@ -1,102 +1,172 @@
 #!/usr/bin/env node
 
 /**
- * CLI entry point for the npm SBOM scanner.
+ * Command-line interface for SBOM-TOOL.
  *
- * Usage:
- *   node src/cli.js scan <project-path> [--output <output-path>]
- *
- * Examples:
- *   node src/cli.js scan ./my-application
- *   node src/cli.js scan /Users/user/projects/my-app --output ./bom.json
- *   node src/cli.js scan "./path with spaces/app"
+ * Supported commands:
+ *   scan    Scan an npm project and inspect its dependencies.
+ *   sbom    Generate a CycloneDX SBOM for the selected project.
+ *   audit   Perform security vulnerability and anomaly analysis on a project.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { scanProject } from './scanner/index.js';
+import { checkVulnerabilities } from './vulnerabilityChecker.js';
+import { detectAnomalies, summarizeAnomalies } from './anomalyDetector.js';
+import { ScanStatus } from './errors.js';
 
-const args = process.argv.slice(2);
+// Resolve tool version from package.json
+const pkgJsonPath = new URL('../package.json', import.meta.url);
+let VERSION = '0.1.0';
+try {
+  const pkgData = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+  VERSION = pkgData.version || '0.1.0';
+} catch {
+  // Fallback to default version if unreadable
+}
 
-function printUsage() {
-  console.log(`
-npm-sbom-tool — Software Bill of Materials Scanner
+function printGeneralHelp() {
+  console.log(`sbom-tool — Software Bill of Materials & Security Analysis CLI (v${VERSION})
 
 Usage:
-  node src/cli.js scan <project-path> [--output <output-path>] [--vulnerabilities] [--previous-sbom <path>]
+  sbom-tool <command> [project-path] [options]
 
 Commands:
-  scan    Scan an npm project and generate a CycloneDX SBOM.
+  scan     Scan an npm project and inspect its dependencies.
+  sbom     Generate a CycloneDX SBOM for the selected project.
+  audit    Perform vulnerability and anomaly analysis on a project.
 
-Options:
-  --output, -o          Output file path for the generated SBOM.
-                        Default: ./sbom-output.cdx.json
-  --vulnerabilities, -v Enable OSV vulnerability analysis for discovered dependencies.
-  --previous-sbom       Path to a previous CycloneDX SBOM JSON file for dependency comparison.
+Global Options:
+  --help, -h       Show help for sbom-tool or a specific command.
+  --version, -V    Show version number.
+
+Run "sbom-tool <command> --help" for detailed information on a specific command.
 
 Examples:
-  node src/cli.js scan ./my-application
-  node src/cli.js scan /Users/user/projects/app --output ./bom.json
-  node src/cli.js scan ./my-application --vulnerabilities
-  node src/cli.js scan ./my-application --previous-sbom ./old-bom.cdx.json
-  node src/cli.js scan "./path with spaces/project"
+  sbom-tool scan ./my-project
+  sbom-tool sbom ./my-project --output ./reports/sbom.cdx.json
+  sbom-tool audit ./my-project --vuln --anomaly
 `);
 }
 
-async function main() {
-  if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
-    printUsage();
-    process.exit(0);
-  }
+function printScanHelp() {
+  console.log(`sbom-tool scan — Scan an npm project and inspect its dependencies
 
-  const command = args[0];
+Usage:
+  sbom-tool scan <project-path> [options]
 
-  if (command !== 'scan') {
-    console.error(`Unknown command: "${command}". Use "scan" to scan a project.`);
-    printUsage();
+Options:
+  --output, -o <path>    Write scan report (or generated SBOM) to file.
+  --json                 Output structured scan results in JSON format to stdout.
+  --vulnerabilities, -v  Enable OSV vulnerability analysis for discovered dependencies.
+  --previous-sbom <path> Path to a previous CycloneDX SBOM JSON file for dependency comparison.
+  --help, -h             Show this help message.
+
+Examples:
+  sbom-tool scan .
+  sbom-tool scan ./my-project
+  sbom-tool scan ./my-project --json
+  sbom-tool scan ./my-project --output ./scan-report.json
+  sbom-tool scan ./my-project --vulnerabilities
+  sbom-tool scan ./my-project --previous-sbom ./prev.cdx.json
+`);
+}
+
+function printSbomHelp() {
+  console.log(`sbom-tool sbom — Generate a CycloneDX SBOM for the selected project
+
+Usage:
+  sbom-tool sbom <project-path> [options]
+
+Options:
+  --output, -o <path>    Output file path for the generated CycloneDX SBOM.
+                         (Default: ./sbom.cdx.json when not writing to stdout)
+  --json                 Output CycloneDX SBOM JSON directly to stdout.
+  --help, -h             Show this help message.
+
+Examples:
+  sbom-tool sbom .
+  sbom-tool sbom ./my-project
+  sbom-tool sbom ./my-project --output ./bom.cdx.json
+  sbom-tool sbom ./my-project -o ./reports/sbom.json
+  sbom-tool sbom ./my-project --json > sbom.json
+`);
+}
+
+function printAuditHelp() {
+  console.log(`sbom-tool audit — Perform vulnerability and anomaly analysis on a project
+
+Usage:
+  sbom-tool audit <project-path> [options]
+
+Options:
+  --vuln, -v             Perform vulnerability analysis only (or explicitly).
+  --anomaly, -a          Perform anomaly analysis only (or explicitly).
+  --output, -o <path>    Output file path for the structured audit report JSON.
+  --json                 Output structured audit report JSON directly to stdout.
+  --help, -h             Show this help message.
+
+Note:
+  When neither --vuln nor --anomaly is specified, both analyses are performed by default.
+
+Examples:
+  sbom-tool audit .
+  sbom-tool audit ./my-project
+  sbom-tool audit ./my-project --vuln
+  sbom-tool audit ./my-project --anomaly
+  sbom-tool audit ./my-project --vuln --anomaly
+  sbom-tool audit ./my-project --output ./audit-report.json
+  sbom-tool audit ./my-project --json
+`);
+}
+
+function validateOutputPath(outputPath, resolvedProject) {
+  const resolvedOutput = path.resolve(outputPath);
+
+  if (fs.existsSync(resolvedOutput) && fs.statSync(resolvedOutput).isDirectory()) {
+    console.error(`Error: Output path must be a file, not a directory: ${outputPath}`);
     process.exit(1);
   }
 
-  if (args.length < 2) {
-    console.error('Error: Project path is required.');
-    printUsage();
+  const pkgJsonPath = path.resolve(resolvedProject, 'package.json');
+  const lockJsonPath = path.resolve(resolvedProject, 'package-lock.json');
+  if (resolvedOutput === pkgJsonPath || resolvedOutput === lockJsonPath) {
+    console.error(`Error: Cannot overwrite project file: ${outputPath}`);
     process.exit(1);
   }
 
-  const projectPath = args[1];
-  let outputPath = './sbom-output.cdx.json';
-  let checkVulns = false;
-  let previousSbomPath = null;
+  return resolvedOutput;
+}
 
-  // Parse optional arguments
-  for (let i = 2; i < args.length; i++) {
-    if (args[i] === '--output' || args[i] === '-o') {
-      if (i + 1 >= args.length) {
-        console.error('Error: --output requires a file path argument.');
-        process.exit(1);
-      }
-      outputPath = args[i + 1];
-      i++; // skip the value
-    } else if (args[i] === '--vulnerabilities' || args[i] === '-v') {
-      checkVulns = true;
-    } else if (args[i] === '--previous-sbom') {
-      if (i + 1 >= args.length) {
-        console.error('Error: --previous-sbom requires a file path argument.');
-        process.exit(1);
-      }
-      previousSbomPath = args[i + 1];
-      i++;
+function writeJsonFile(filePath, data) {
+  try {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
     }
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+  } catch (err) {
+    console.error(`Error: Failed to write output file "${filePath}": ${err.message}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * Executes the 'scan' command.
+ */
+async function handleScan(projectPath, options) {
+  const resolvedProject = path.resolve(projectPath);
+  let resolvedOutput = null;
+  if (options.output) {
+    resolvedOutput = validateOutputPath(options.output, resolvedProject);
   }
 
-  console.log(`Scanning project: ${path.resolve(projectPath)}`);
-  console.log();
+  const scanOptions = { vulnerabilities: Boolean(options.vulnerabilities) };
 
-  const scanOptions = { vulnerabilities: checkVulns };
-
-  if (previousSbomPath) {
+  if (options.previousSbom) {
     try {
-      const prevContent = fs.readFileSync(path.resolve(previousSbomPath), 'utf-8');
+      const prevContent = fs.readFileSync(path.resolve(options.previousSbom), 'utf8');
       scanOptions.previousBom = JSON.parse(prevContent);
     } catch (err) {
       console.error(`Error reading previous SBOM: ${err.message}`);
@@ -106,7 +176,19 @@ async function main() {
 
   const result = await scanProject(projectPath, scanOptions);
 
-  // Report scan status
+  // If JSON output requested on stdout
+  if (options.json) {
+    process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+    if (resolvedOutput) {
+      writeJsonFile(resolvedOutput, result);
+    }
+    const hasValidationError = result.validation && !result.validation.valid;
+    process.exit((result.status === ScanStatus.FAILED || hasValidationError) ? 1 : 0);
+  }
+
+  // Human-readable terminal output
+  console.log(`Scanning project: ${resolvedProject}`);
+  console.log();
   console.log(`Scan status: ${result.status}`);
 
   if (result.projectMetadata) {
@@ -117,13 +199,24 @@ async function main() {
     console.log(`Lockfile version: ${result.lockfileVersion}`);
   }
 
-  // Count components (excluding root)
-  const packageCount = result.components.filter(c => !c.isRoot).length;
+  const components = Array.isArray(result.components) ? result.components : [];
+  const packageCount = components.filter(c => !c.isRoot).length;
   console.log(`Components discovered: ${packageCount}`);
+
+  const directDeps = components.filter(c => !c.isRoot && c.dependencyType === 'direct').length;
+  const transitiveDeps = components.filter(c => !c.isRoot && c.dependencyType === 'transitive').length;
+  const workspaceDeps = components.filter(c => !c.isRoot && (c.isFirstParty || c.dependencyType === 'workspace')).length;
+
+  if (packageCount > 0) {
+    console.log(`Direct dependencies: ${directDeps}`);
+    console.log(`Transitive dependencies: ${transitiveDeps}`);
+    if (workspaceDeps > 0) {
+      console.log(`Workspace packages: ${workspaceDeps}`);
+    }
+  }
   console.log();
 
-  // Report warnings
-  if (result.warnings.length > 0) {
+  if (result.warnings && result.warnings.length > 0) {
     console.log(`Warnings (${result.warnings.length}):`);
     for (const w of result.warnings) {
       console.log(`  ⚠ [${w.code}] ${w.message}`);
@@ -131,8 +224,7 @@ async function main() {
     console.log();
   }
 
-  // Report errors
-  if (result.errors.length > 0) {
+  if (result.errors && result.errors.length > 0) {
     console.log(`Errors (${result.errors.length}):`);
     for (const e of result.errors) {
       console.error(`  ✗ [${e.code}] ${e.message}`);
@@ -140,7 +232,6 @@ async function main() {
     console.log();
   }
 
-  // Report validation errors if present
   if (result.validation && !result.validation.valid) {
     console.error(`BOM validation failed with ${result.validation.errors.length} error(s):`);
     for (const err of result.validation.errors) {
@@ -149,8 +240,8 @@ async function main() {
     console.log();
   }
 
-  // Report vulnerability analysis if requested
-  if (checkVulns) {
+  // Vulnerability analysis section (when requested)
+  if (options.vulnerabilities) {
     console.log('--- Vulnerability Analysis ---');
     if (!result.vulnerabilities) {
       console.log('Vulnerability analysis skipped (complete and valid SBOM required).');
@@ -199,7 +290,7 @@ async function main() {
     }
   }
 
-  // Report anomaly detection results
+  // Anomaly detection results (if present in result)
   if (result.anomalies) {
     console.log('--- Anomaly Detection ---');
     const a = result.anomalies;
@@ -213,7 +304,7 @@ async function main() {
     console.log();
   }
 
-  // Report dependency comparison results
+  // Dependency comparison results (if present in result)
   if (result.comparison) {
     console.log('--- Dependency Comparison ---');
     const c = result.comparison;
@@ -231,44 +322,413 @@ async function main() {
     console.log();
   }
 
-  // Write output
-  if (result.status === 'complete' && result.bom && result.validation?.valid) {
-    const resolvedOutput = path.resolve(outputPath);
-    const outputDir = path.dirname(resolvedOutput);
-    if (!fs.existsSync(outputDir)) {
-      fs.mkdirSync(outputDir, { recursive: true });
-    }
-    fs.writeFileSync(resolvedOutput, JSON.stringify(result.bom, null, 2), 'utf-8');
-    console.log(`CycloneDX SBOM written to: ${resolvedOutput}`);
-  } else if (result.status === 'partial') {
-    if (result.validation && !result.validation.valid) {
-      console.log('BOM validation failed. No CycloneDX SBOM generated.');
-    } else {
-      console.log('Partial scan completed. No CycloneDX SBOM generated (lockfile required for complete scan).');
-    }
+  // File output handling when --output is provided
+  if (resolvedOutput) {
+    if (result.status === ScanStatus.COMPLETE && result.bom && result.validation?.valid) {
+      writeJsonFile(resolvedOutput, result.bom);
+      console.log(`CycloneDX SBOM written to: ${resolvedOutput}`);
+    } else if (result.status === ScanStatus.PARTIAL) {
+      if (result.validation && !result.validation.valid) {
+        console.log('BOM validation failed. No CycloneDX SBOM generated.');
+      } else {
+        console.log('Partial scan completed. No CycloneDX SBOM generated (lockfile required for complete scan).');
+      }
 
-    // Write partial result to a JSON report instead
-    const partialOutput = outputPath.replace(/\.cdx\.json$/, '.partial.json');
-    const resolvedOutput = path.resolve(partialOutput);
-    fs.writeFileSync(resolvedOutput, JSON.stringify({
-      scanStatus: result.status,
-      projectMetadata: result.projectMetadata,
-      warnings: result.warnings,
-      errors: result.errors,
-      components: result.components,
-      validation: result.validation,
-    }, null, 2), 'utf-8');
-    console.log(`Partial scan report written to: ${resolvedOutput}`);
-  } else {
-    console.log('Scan failed. No output generated.');
+      const partialOutput = resolvedOutput.endsWith('.cdx.json')
+        ? resolvedOutput.replace(/\.cdx\.json$/, '.partial.json')
+        : resolvedOutput;
+      writeJsonFile(partialOutput, {
+        scanStatus: result.status,
+        projectMetadata: result.projectMetadata,
+        warnings: result.warnings,
+        errors: result.errors,
+        components: result.components,
+        validation: result.validation,
+      });
+      console.log(`Partial scan report written to: ${partialOutput}`);
+    } else {
+      console.log('Scan failed. No output generated.');
+    }
   }
 
-  // Exit with non-zero if scan failed or if validation failed
   const hasValidationError = result.validation && !result.validation.valid;
-  process.exit((result.status === 'failed' || hasValidationError) ? 1 : 0);
+  process.exit((result.status === ScanStatus.FAILED || hasValidationError) ? 1 : 0);
+}
+
+/**
+ * Executes the 'sbom' command.
+ */
+async function handleSbom(projectPath, options) {
+  const resolvedProject = path.resolve(projectPath);
+
+  let resolvedOutput = null;
+  if (options.output) {
+    resolvedOutput = validateOutputPath(options.output, resolvedProject);
+  } else if (!options.json) {
+    // Default output path when --json is not specified
+    resolvedOutput = validateOutputPath('./sbom.cdx.json', resolvedProject);
+  }
+
+  const result = await scanProject(projectPath);
+
+  if (result.status === ScanStatus.FAILED) {
+    console.error('Error: Scan failed. Unable to generate CycloneDX SBOM.');
+    if (result.errors && result.errors.length > 0) {
+      for (const err of result.errors) {
+        console.error(`  ✗ [${err.code || 'SCAN_ERROR'}] ${err.message}`);
+      }
+    }
+    process.exit(1);
+  }
+
+  if (result.status === ScanStatus.PARTIAL || !result.bom) {
+    console.error('Error: Cannot generate CycloneDX SBOM for partial scan (package-lock.json is required).');
+    process.exit(1);
+  }
+
+  if (result.validation && !result.validation.valid) {
+    console.error('Error: Generated CycloneDX SBOM failed validation:');
+    for (const valErr of result.validation.errors) {
+      console.error(`  ✗ ${valErr}`);
+    }
+    process.exit(1);
+  }
+
+  if (resolvedOutput) {
+    writeJsonFile(resolvedOutput, result.bom);
+    if (!options.json) {
+      console.log(`CycloneDX SBOM written to: ${resolvedOutput}`);
+    }
+  }
+
+  if (options.json) {
+    process.stdout.write(JSON.stringify(result.bom, null, 2) + '\n');
+  }
+
+  process.exit(0);
+}
+
+/**
+ * Computes vulnerability severity counts from findings.
+ */
+function computeSeverityCounts(findings) {
+  const counts = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
+  if (!Array.isArray(findings)) return counts;
+
+  for (const f of findings) {
+    const scoreVal = parseFloat(f.severity?.score);
+    const scoreStr = (f.severity?.score || '').toUpperCase();
+    const typeStr = (f.severity?.type || '').toUpperCase();
+
+    if (scoreStr.includes('CRITICAL') || scoreVal >= 9.0) {
+      counts.critical++;
+    } else if (scoreStr.includes('HIGH') || scoreVal >= 7.0) {
+      counts.high++;
+    } else if (scoreStr.includes('MODERATE') || scoreStr.includes('MEDIUM') || scoreVal >= 4.0) {
+      counts.medium++;
+    } else if (scoreStr.includes('LOW') || (scoreVal > 0.0 && scoreVal < 4.0)) {
+      counts.low++;
+    } else {
+      counts.unknown++;
+    }
+  }
+  return counts;
+}
+
+/**
+ * Executes the 'audit' command.
+ */
+async function handleAudit(projectPath, options) {
+  const resolvedProject = path.resolve(projectPath);
+
+  let resolvedOutput = null;
+  if (options.output) {
+    resolvedOutput = validateOutputPath(options.output, resolvedProject);
+  }
+
+  // Determine whether to run vulnerability, anomaly, or both
+  const runVuln = Boolean(options.vuln) || (!options.vuln && !options.anomaly);
+  const runAnomaly = Boolean(options.anomaly) || (!options.vuln && !options.anomaly);
+
+  // Scan project
+  const scanResult = await scanProject(projectPath, { vulnerabilities: runVuln });
+
+  if (scanResult.status === ScanStatus.FAILED) {
+    console.error('Error: Project scan failed. Unable to perform audit.');
+    if (scanResult.errors && scanResult.errors.length > 0) {
+      for (const err of scanResult.errors) {
+        console.error(`  ✗ [${err.code || 'SCAN_ERROR'}] ${err.message}`);
+      }
+    }
+    process.exit(1);
+  }
+
+  // Run or extract vulnerability results
+  let vulnData = null;
+  if (runVuln) {
+    if (scanResult.vulnerabilities) {
+      vulnData = scanResult.vulnerabilities;
+    } else {
+      vulnData = await checkVulnerabilities(scanResult);
+    }
+  }
+
+  // Run or extract anomaly results
+  let anomalyData = null;
+  if (runAnomaly) {
+    if (scanResult.anomalies) {
+      anomalyData = scanResult.anomalies;
+    } else {
+      const target = scanResult.bom || scanResult;
+      const findings = detectAnomalies(target);
+      anomalyData = {
+        findings,
+        summary: summarizeAnomalies(findings),
+      };
+    }
+  }
+
+  // Construct structured audit report
+  const components = Array.isArray(scanResult.components) ? scanResult.components : [];
+  const scannedDepsCount = components.filter(c => !c.isRoot).length;
+
+  let overallStatus = 'completed';
+  if (vulnData && (vulnData.status === 'failed' || vulnData.status === 'partial')) {
+    overallStatus = vulnData.status;
+  }
+
+  const auditReport = {
+    project: {
+      name: scanResult.projectMetadata?.name || path.basename(resolvedProject),
+      version: scanResult.projectMetadata?.version || '0.0.0',
+      path: resolvedProject,
+    },
+    summary: {
+      dependenciesScanned: scannedDepsCount,
+    },
+    status: overallStatus,
+  };
+
+  if (runVuln && vulnData) {
+    auditReport.summary.vulnerabilitiesFound = vulnData.findings?.length || 0;
+    auditReport.vulnerabilities = {
+      status: vulnData.status,
+      scannedPackages: vulnData.scannedPackages,
+      totalPackages: vulnData.totalPackages,
+      vulnerablePackages: vulnData.vulnerablePackages,
+      findings: vulnData.findings || [],
+      warnings: vulnData.warnings || [],
+      errors: vulnData.errors || [],
+    };
+  }
+
+  if (runAnomaly && anomalyData) {
+    auditReport.summary.anomaliesFound = anomalyData.summary?.total || 0;
+    auditReport.anomalies = {
+      total: anomalyData.summary?.total || 0,
+      bySeverity: anomalyData.summary?.bySeverity || { error: 0, warning: 0, info: 0 },
+      byType: anomalyData.summary?.byType || {},
+      findings: anomalyData.findings || [],
+    };
+  }
+
+  // Handle output file
+  if (resolvedOutput) {
+    writeJsonFile(resolvedOutput, auditReport);
+  }
+
+  // Handle JSON stdout
+  if (options.json) {
+    process.stdout.write(JSON.stringify(auditReport, null, 2) + '\n');
+    process.exit(0);
+  }
+
+  // Human-readable terminal output
+  console.log('Security Audit');
+  console.log();
+  console.log(`Project: ${auditReport.project.name}@${auditReport.project.version}`);
+  console.log(`Path: ${auditReport.project.path}`);
+  console.log();
+  console.log(`Dependencies scanned: ${scannedDepsCount}`);
+  console.log();
+
+  if (runVuln && vulnData) {
+    console.log('--- Vulnerabilities ---');
+    console.log(`Status: ${vulnData.status.toUpperCase()}`);
+    console.log(`Packages checked: ${vulnData.scannedPackages}/${vulnData.totalPackages}`);
+    console.log(`Vulnerabilities found: ${vulnData.findings?.length || 0}`);
+
+    const sev = computeSeverityCounts(vulnData.findings);
+    console.log(`Critical: ${sev.critical}`);
+    console.log(`High: ${sev.high}`);
+    console.log(`Medium: ${sev.medium}`);
+    console.log(`Low: ${sev.low}`);
+    if (sev.unknown > 0) {
+      console.log(`Unknown severity: ${sev.unknown}`);
+    }
+    console.log();
+
+    if (vulnData.errors && vulnData.errors.length > 0) {
+      console.log(`Vulnerability query errors (${vulnData.errors.length}):`);
+      for (const err of vulnData.errors) {
+        const pkgStr = err.package ? `${err.package.name}@${err.package.version}` : 'unknown';
+        console.error(`  ✗ [${err.code || 'QUERY_ERROR'}] ${pkgStr}: ${err.error}`);
+      }
+      console.log();
+    }
+
+    if (vulnData.findings && vulnData.findings.length > 0) {
+      console.log('Vulnerability Findings:');
+      for (const f of vulnData.findings) {
+        const sevStr = f.severity ? `[${f.severity.type}: ${f.severity.score}]` : '[SEVERITY: UNKNOWN]';
+        const fixStr = f.fixedVersions?.length > 0 ? ` (Fixed in: ${f.fixedVersions.join(', ')})` : ' (No fix available)';
+        console.log(`  • ${f.id} ${sevStr} - ${f.packageName}@${f.installedVersion} (${f.dependencyType})${fixStr}`);
+        if (f.summary) {
+          console.log(`    Summary: ${f.summary}`);
+        }
+      }
+      console.log();
+    } else if (vulnData.status === 'completed') {
+      console.log('✔ No known vulnerabilities found.');
+      console.log();
+    } else if (vulnData.status === 'partial') {
+      console.log('⚠ Incomplete vulnerability analysis: Some packages could not be checked due to errors.');
+      console.log();
+    }
+  }
+
+  if (runAnomaly && anomalyData) {
+    console.log('--- Anomalies ---');
+    const a = anomalyData;
+    console.log(`Anomalies detected: ${a.summary.total} (errors: ${a.summary.bySeverity.error}, warnings: ${a.summary.bySeverity.warning}, info: ${a.summary.bySeverity.info})`);
+
+    if (a.findings && a.findings.length > 0) {
+      for (const f of a.findings) {
+        const compName = f.component?.name || f.component?.bomRef || 'unknown';
+        console.log(`  ${f.severity === 'error' ? '✗' : f.severity === 'warning' ? '⚠' : 'ℹ'} [${f.type}] ${compName}: ${f.message}`);
+      }
+    } else {
+      console.log('✔ No anomalies detected.');
+    }
+    console.log();
+  }
+
+  if (resolvedOutput) {
+    console.log(`Audit report written to: ${resolvedOutput}`);
+    console.log();
+  }
+
+  console.log(`Audit completed (Status: ${overallStatus}).`);
+  process.exit(0);
+}
+
+/**
+ * Main CLI entry point.
+ */
+async function main() {
+  const args = process.argv.slice(2);
+
+  if (args.length === 0) {
+    printGeneralHelp();
+    process.exit(0);
+  }
+
+  // Check global flags without command
+  if (args[0] === '--help' || args[0] === '-h') {
+    printGeneralHelp();
+    process.exit(0);
+  }
+
+  if (args[0] === '--version' || args[0] === '-V' || (args[0] === '-v' && args.length === 1)) {
+    console.log(VERSION);
+    process.exit(0);
+  }
+
+  const command = args[0];
+  const supportedCommands = ['scan', 'sbom', 'audit'];
+
+  if (!supportedCommands.includes(command)) {
+    console.error(`Error: Unknown command "${command}". Available commands: scan, sbom, audit`);
+    console.error();
+    printGeneralHelp();
+    process.exit(1);
+  }
+
+  // Parse command arguments
+  let projectPath = null;
+  const options = {};
+  const remaining = args.slice(1);
+
+  for (let i = 0; i < remaining.length; i++) {
+    const arg = remaining[i];
+
+    if (arg === '--help' || arg === '-h') {
+      if (command === 'scan') printScanHelp();
+      else if (command === 'sbom') printSbomHelp();
+      else if (command === 'audit') printAuditHelp();
+      process.exit(0);
+    }
+
+    if (arg === '--output' || arg === '-o') {
+      if (i + 1 >= remaining.length || remaining[i + 1].startsWith('-')) {
+        console.error('Error: --output requires a file path argument.');
+        process.exit(1);
+      }
+      options.output = remaining[i + 1];
+      i++;
+    } else if (arg === '--json') {
+      options.json = true;
+    } else if (arg === '--vulnerabilities' || (command === 'scan' && arg === '-v')) {
+      options.vulnerabilities = true;
+    } else if (arg === '--vuln' || (command === 'audit' && arg === '-v')) {
+      options.vuln = true;
+    } else if (arg === '--anomaly' || (command === 'audit' && arg === '-a')) {
+      options.anomaly = true;
+    } else if (arg === '--previous-sbom') {
+      if (i + 1 >= remaining.length || remaining[i + 1].startsWith('-')) {
+        console.error('Error: --previous-sbom requires a file path argument.');
+        process.exit(1);
+      }
+      options.previousSbom = remaining[i + 1];
+      i++;
+    } else if (arg.startsWith('-')) {
+      console.error(`Error: Unknown option "${arg}".`);
+      process.exit(1);
+    } else {
+      if (projectPath === null) {
+        projectPath = arg;
+      } else {
+        console.error(`Error: Unexpected argument "${arg}".`);
+        process.exit(1);
+      }
+    }
+  }
+
+  if (!projectPath) {
+    console.error('Error: Project path is required.');
+    console.error();
+    if (command === 'scan') printScanHelp();
+    else if (command === 'sbom') printSbomHelp();
+    else if (command === 'audit') printAuditHelp();
+    process.exit(1);
+  }
+
+  const resolvedProject = path.resolve(projectPath);
+  if (!fs.existsSync(resolvedProject)) {
+    console.error(`Error: Project path does not exist: ${projectPath}`);
+    process.exit(1);
+  }
+
+  if (command === 'scan') {
+    await handleScan(projectPath, options);
+  } else if (command === 'sbom') {
+    await handleSbom(projectPath, options);
+  } else if (command === 'audit') {
+    await handleAudit(projectPath, options);
+  }
 }
 
 main().catch(err => {
-  console.error('Unexpected error:', err);
+  console.error(`Error: ${err.message || err}`);
   process.exit(1);
 });

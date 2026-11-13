@@ -5,10 +5,12 @@
   "main": "src/index.js",
   "type": "module",
   "bin": {
-    "npm-sbom-tool": "src/cli.js"
+    "npm-sbom-tool": "src/cli.js",
+    "sbom-tool": "src/cli.js"
   },
   "scripts": {
     "test": "node --test test/**/*.test.js",
+    "test:cli": "node --test test/cli.test.js",
     "test:scanner": "node --test test/scanner.test.js",
     "test:parser": "node --test test/parser.test.js",
     "test:resolver": "node --test test/dependencyResolver.test.js",
@@ -25,6 +27,8 @@
     "test:compare": "node --test test/dependencyComparison.test.js",
     "test:order16": "node --test test/anomalyComparison.integration.test.js",
     "scan": "node src/cli.js scan",
+    "sbom": "node src/cli.js sbom",
+    "audit": "node src/cli.js audit",
     "check": "node --check src/index.js src/engine/index.js src/scanner/index.js src/cli.js src/errors.js src/fileDiscovery.js src/parser.js src/dependencyResolver.js src/dependencyGraph.js src/workspaceDiscovery.js src/cyclonedxGenerator.js src/validator.js src/osvClient.js src/vulnerabilityMatcher.js src/vulnerabilityFindings.js src/vulnerabilityChecker.js src/anomalyDetector.js src/dependencyComparison.js"
   },
   "keywords": [
