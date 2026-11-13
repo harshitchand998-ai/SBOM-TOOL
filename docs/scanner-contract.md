@@ -57,6 +57,25 @@ interface ScanResult {
   bom: CycloneDXBom | null;
   validation: ValidationResult | null;
   vulnerabilities: VulnerabilityAnalysisResult | null;
+  anomalies: AnomalyAnalysisResult | null;
+  comparison: ComparisonResult | null;
+}
+
+interface AnomalyAnalysisResult {
+  findings: AnomalyFinding[];
+  summary: {
+    total: number;
+    bySeverity: { error: number; warning: number; info: number };
+    byType: Record<string, number>;
+  };
+}
+
+interface AnomalyFinding {
+  type: string;
+  severity: 'error' | 'warning' | 'info';
+  affectedComponent: ComponentSnapshot | null;
+  explanation: string;
+  [key: string]: any;
 }
 
 interface ValidationResult {
@@ -91,6 +110,8 @@ interface VulnerabilityAnalysisResult {
 | `bom` | `object \| null` | Generated CycloneDX 1.7 JSON SBOM (`null` for `'partial'` and `'failed'` scans). |
 | `validation` | `ValidationResult \| null` | Structural validation result (`{ valid, errors, warnings }`), or `null` when no BOM is generated. |
 | `vulnerabilities` | `VulnerabilityAnalysisResult \| null` | OSV vulnerability analysis findings, or `null` when not requested or scan is incomplete/failed. |
+| `anomalies` | `AnomalyAnalysisResult \| null` | Detected metadata and graph anomalies with structured explanations, or `null` for incomplete/failed scans. |
+| `comparison` | `ComparisonResult \| null` | Inventory comparison results against `options.previousBom`, or `null` when not provided. |
 
 ---
 

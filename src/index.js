@@ -34,6 +34,7 @@ export {
   detectAnomalies,
   summarizeAnomalies,
   parsePurl,
+  createAnomalyExplanation,
   AnomalyType,
   AnomalySeverity,
 } from './anomalyDetector.js';

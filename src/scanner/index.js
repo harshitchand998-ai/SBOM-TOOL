@@ -5,6 +5,8 @@ import { generateCycloneDX } from '../cyclonedxGenerator.js';
 import { discoverFirstPartyComponentsSync } from '../workspaceDiscovery.js';
 import { validateStructure } from '../validator.js';
 import { checkVulnerabilities } from '../vulnerabilityChecker.js';
+import { detectAnomalies, summarizeAnomalies } from '../anomalyDetector.js';
+import { compareInventories } from '../dependencyComparison.js';
 import { ScanStatus, ErrorCodes, createScanError } from '../errors.js';
 
 /**
@@ -36,6 +38,8 @@ export function scanProjectSync(projectPath) {
       bom: null,
       validation: null,
       vulnerabilities: null,
+      anomalies: null,
+      comparison: null,
     };
   }
 
@@ -53,6 +57,8 @@ export function scanProjectSync(projectPath) {
       bom: null,
       validation: null,
       vulnerabilities: null,
+      anomalies: null,
+      comparison: null,
     };
   }
 
@@ -73,6 +79,8 @@ export function scanProjectSync(projectPath) {
       bom: null,
       validation: null,
       vulnerabilities: null,
+      anomalies: null,
+      comparison: null,
     };
   }
 
@@ -135,6 +143,8 @@ export function scanProjectSync(projectPath) {
         bom: null,
         validation: null,
         vulnerabilities: null,
+        anomalies: null,
+        comparison: null,
       };
     }
   } else {
@@ -207,26 +217,55 @@ export function scanProjectSync(projectPath) {
     bom,
     validation,
     vulnerabilities: null,
+    anomalies: null,
+    comparison: null,
   };
 }
 
 /**
  * Asynchronously scans a project directory and produces a structured scan result
  * with components, dependency edges, CycloneDX SBOM, validation information,
- * and optional OSV vulnerability findings.
+ * and optional OSV vulnerability findings, anomaly detection, and dependency comparison.
  *
  * @param {string} projectPath - Path to the project directory.
- * @param {object} [options={}] - Scan options (e.g., vulnerabilities: boolean).
- * @returns {Promise<object>} Scan result containing status, components, errors, warnings, BOM, validation, and vulnerabilities.
+ * @param {object} [options={}] - Scan options.
+ * @param {boolean} [options.vulnerabilities] - Enable OSV vulnerability analysis.
+ * @param {object} [options.previousBom] - Previous SBOM for dependency comparison.
+ * @returns {Promise<object>} Scan result.
  */
 export async function scanProject(projectPath, options = {}) {
   const result = scanProjectSync(projectPath);
 
+  // Anomaly detection on complete scans with a valid BOM
+  if (result.status === ScanStatus.COMPLETE && result.bom && result.validation?.valid) {
+    try {
+      const anomalyList = detectAnomalies(result.bom);
+      result.anomalies = {
+        findings: anomalyList,
+        summary: summarizeAnomalies(anomalyList),
+      };
+    } catch {
+      // Anomaly detection failure must not invalidate the SBOM
+      result.anomalies = null;
+    }
+  }
+
+  // Vulnerability analysis
   if (options && options.vulnerabilities) {
     if (result.status === ScanStatus.COMPLETE && result.bom && result.validation?.valid) {
       result.vulnerabilities = await checkVulnerabilities(result, options);
     } else {
       result.vulnerabilities = null;
+    }
+  }
+
+  // Dependency comparison when a previous SBOM is provided
+  if (options && options.previousBom) {
+    try {
+      const currentBom = result.bom || result;
+      result.comparison = compareInventories(options.previousBom, currentBom);
+    } catch {
+      result.comparison = null;
     }
   }
 

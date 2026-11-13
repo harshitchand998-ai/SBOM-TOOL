@@ -126,7 +126,7 @@ import {
   discoverFirstPartyComponents,
 } from "npm-sbom-tool";
 
-// 1. Asynchronously scan an npm project
+// 1. Asynchronously scan an npm project (includes anomaly detection)
 const result = await scanProject("./fixtures/workspace-with-lockfile-project");
 
 console.log(result.status);           // 'complete' | 'partial' | 'failed'
@@ -135,18 +135,23 @@ console.log(result.components);       // Array of discovered components (root + 
 console.log(result.dependencyEdges);  // Adjacency list mapping bomRef -> [child bomRefs]
 console.log(result.bom);              // CycloneDX 1.7 JSON SBOM object (or null for partial/failed)
 console.log(result.validation);       // { valid: true, errors: [], warnings: [] } (or null if no BOM)
+console.log(result.anomalies);        // { findings: [...], summary: { total, bySeverity, byType } }
 
-// 2. Synchronously scan an npm project (guaranteed identical result)
+// 2. Scan with dependency comparison against a previous SBOM
+const compared = await scanProject("./fixtures/simple-project", { previousBom: result.bom });
+console.log(compared.comparison);     // { status: 'completed', summary, added, removed, changed, unchanged }
+
+// 3. Synchronously scan an npm project (guaranteed identical result)
 const syncResult = scanProjectSync("./fixtures/simple-project");
 console.log(syncResult.status);       // 'complete'
 console.log(syncResult.validation.valid); // true
 
-// 3. Standalone structural validation of any CycloneDX BOM
+// 4. Standalone structural validation of any CycloneDX BOM
 const validation = validateStructure(result.bom);
 console.log(validation.valid);        // true
 console.log(validation.errors);       // []
 
-// 4. Standalone PURL validation
+// 5. Standalone PURL validation
 const purlCheck = validatePurl("pkg:npm/%40babel/core@7.24.0");
 console.log(purlCheck.valid);         // true
 ```
@@ -159,6 +164,9 @@ node src/cli.js scan fixtures/workspace-with-lockfile-project --output ./bom.cdx
 
 # Scan a simple project (default output: ./sbom-output.cdx.json)
 node src/cli.js scan fixtures/simple-project
+
+# Scan a project and compare dependencies against a previous SBOM
+node src/cli.js scan fixtures/simple-project --previous-sbom ./old-bom.cdx.json
 
 # Scan a project and analyze dependencies for vulnerabilities via OSV
 node src/cli.js scan fixtures/simple-project --vulnerabilities
@@ -321,21 +329,70 @@ Vulnerability API failures are completely isolated from SBOM generation. Even if
 
 ## Anomaly Detection
 
-`detectAnomalies()` inspects a CycloneDX SBOM or scanner result to identify missing/invalid metadata (names, SemVer versions, PURLs, external references) and dependency graph issues (unresolved references, orphan components, duplicate `bom-ref`s, duplicate edges, self-references).
+Anomaly detection automatically analyzes generated CycloneDX SBOMs during complete scans to identify metadata inconsistencies, invalid versions, malformed identifiers, and broken graph relationships. Findings are attached to the scan result under `result.anomalies`.
+
+### Anomaly Output Structure
+
+Each anomaly finding contains:
+
+```typescript
+interface AnomalyFinding {
+  id: string;                                 // e.g. "ANOMALY-001"
+  type: string;                               // e.g. "MISSING_PURL", "INVALID_VERSION"
+  severity: 'error' | 'warning' | 'info';     // Finding severity level
+  affectedComponent: ComponentSnapshot | null;// Associated component metadata
+  explanation: string;                        // Clear explanation (why flagged, inconsistency detected, why it matters)
+}
+```
+
+Each `explanation` explicitly details:
+1. **Why the component was flagged** (e.g. missing name, invalid SemVer, unresolvable reference).
+2. **What inconsistency or unusual behavior was detected** (e.g. specific field values or graph edges).
+3. **Why the finding matters** (impact on supply chain traceability, vulnerability matching, or tooling interoperability).
+
+### Separation from Vulnerabilities & Non-Blocking Nature
+
+- **Strict Separation**: Anomalies are structural and metadata findings, completely separate from OSV security vulnerabilities (`result.vulnerabilities`). Anomalies are never categorized as vulnerabilities.
+- **Non-Invalidating**: Anomalies are informational audit findings; they do not cause a valid CycloneDX SBOM to be rejected or invalidated.
+- **Failure Resilience**: Anomaly analysis failures are safely caught and never cause a scan to fail.
 
 ```javascript
-import { detectAnomalies } from 'npm-sbom-tool';
+import { detectAnomalies, scanProject } from 'npm-sbom-tool';
 
+// Standalone anomaly detection
 const { anomalies, summary } = detectAnomalies(result.bom, { summary: true });
+
+// Integrated in scanProject()
+const scanResult = await scanProject('./my-app');
+console.log(scanResult.anomalies.findings); // Array of structured anomaly records
+console.log(scanResult.anomalies.summary);  // { total, bySeverity, byType }
 ```
 
 For full details on anomaly types, severity levels, and options, see the [Anomaly Detection Specification](docs/anomaly-detection.md).
 
 ## Dependency Comparison
 
-The `dependencyComparison` module compares two SBOM inventories (`previousBom` vs `currentBom`) and classifies dependency changes into **added**, **removed**, **changed** (upgrades, downgrades, metadata changes, non-comparable version changes), and **unchanged** components.
+The dependency comparison module compares two SBOM inventories (`previousBom` vs `currentBom`) and classifies dependency changes into **added**, **removed**, **changed** (upgrades, downgrades, metadata changes, non-comparable version changes), and **unchanged** components.
 
-### Usage
+### Integrated Scanning Workflow
+
+Provide a previous SBOM via `options.previousBom` to `scanProject()` or the `--previous-sbom` CLI flag:
+
+```javascript
+import { scanProject } from 'npm-sbom-tool';
+
+// Pass previousBom to scanProject
+const result = await scanProject('./my-app', { previousBom: previousBomObject });
+
+console.log(result.comparison.status);  // 'completed' | 'failed'
+console.log(result.comparison.summary); // { added, removed, changed, unchanged }
+console.log(result.comparison.added);   // Added dependencies with explanations
+console.log(result.comparison.changed); // Upgraded/downgraded dependencies with explanations
+```
+
+When no previous SBOM is provided, normal scanning proceeds with `result.comparison: null`.
+
+### Standalone Usage
 
 ```javascript
 import { compareInventories, scanProject } from 'npm-sbom-tool';
