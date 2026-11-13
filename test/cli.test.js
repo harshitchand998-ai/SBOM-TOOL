@@ -438,4 +438,170 @@ describe('CLI Commands Integration Suite', () => {
       });
     });
   });
+
+  // ==========================================
+  // 4. Argument Validation & Help Tests
+  // ==========================================
+  describe('Argument Validation & General Behavior', () => {
+    it('displays general help and exits with code 0 when called without arguments', () => {
+      const stdout = execFileSync(process.execPath, [cliScriptPath], {
+        encoding: 'utf8',
+      });
+
+      assert.ok(stdout.includes('Usage:'));
+      assert.ok(stdout.includes('Commands:'));
+      assert.ok(stdout.includes('scan'));
+      assert.ok(stdout.includes('sbom'));
+      assert.ok(stdout.includes('audit'));
+    });
+
+    it('displays general help with --help and -h flags', () => {
+      const stdoutLong = execFileSync(process.execPath, [cliScriptPath, '--help'], { encoding: 'utf8' });
+      assert.ok(stdoutLong.includes('sbom-tool — Software Bill of Materials & Security Analysis CLI'));
+
+      const stdoutShort = execFileSync(process.execPath, [cliScriptPath, '-h'], { encoding: 'utf8' });
+      assert.ok(stdoutShort.includes('sbom-tool — Software Bill of Materials & Security Analysis CLI'));
+    });
+
+    it('displays command-specific help for scan, sbom, and audit', () => {
+      const scanHelp = execFileSync(process.execPath, [cliScriptPath, 'scan', '--help'], { encoding: 'utf8' });
+      assert.ok(scanHelp.includes('sbom-tool scan'));
+      assert.ok(scanHelp.includes('--previous-sbom'));
+
+      const sbomHelp = execFileSync(process.execPath, [cliScriptPath, 'sbom', '-h'], { encoding: 'utf8' });
+      assert.ok(sbomHelp.includes('sbom-tool sbom'));
+
+      const auditHelp = execFileSync(process.execPath, [cliScriptPath, 'audit', '--help'], { encoding: 'utf8' });
+      assert.ok(auditHelp.includes('sbom-tool audit'));
+      assert.ok(auditHelp.includes('--anomaly'));
+    });
+
+    it('displays version number with --version and -V', () => {
+      const stdoutLong = execFileSync(process.execPath, [cliScriptPath, '--version'], { encoding: 'utf8' });
+      assert.match(stdoutLong.trim(), /^\d+\.\d+\.\d+$/);
+
+      const stdoutShort = execFileSync(process.execPath, [cliScriptPath, '-V'], { encoding: 'utf8' });
+      assert.match(stdoutShort.trim(), /^\d+\.\d+\.\d+$/);
+    });
+
+    it('fails with code 1 and lists available commands on unknown command', () => {
+      assert.throws(() => {
+        execFileSync(process.execPath, [cliScriptPath, 'unknown-cmd', '.'], {
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      }, (err) => {
+        assert.equal(err.status, 1);
+        assert.ok(err.stderr.includes('Unknown command "unknown-cmd"'));
+        assert.ok(err.stderr.includes('Available commands: scan, sbom, audit'));
+        return true;
+      });
+    });
+
+    it('fails with code 1 when project path is omitted', () => {
+      assert.throws(() => {
+        execFileSync(process.execPath, [cliScriptPath, 'scan'], {
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      }, (err) => {
+        assert.equal(err.status, 1);
+        assert.ok(err.stderr.includes('Project path is required'));
+        return true;
+      });
+    });
+
+    it('fails with code 1 on unknown option flag', () => {
+      const fixturePath = path.join(fixturesDir, 'simple-project');
+      assert.throws(() => {
+        execFileSync(process.execPath, [cliScriptPath, 'scan', fixturePath, '--unrecognized-flag'], {
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      }, (err) => {
+        assert.equal(err.status, 1);
+        assert.ok(err.stderr.includes('Unknown option "--unrecognized-flag"'));
+        return true;
+      });
+    });
+
+    it('fails with code 1 when --output is provided without a value', () => {
+      const fixturePath = path.join(fixturesDir, 'simple-project');
+      assert.throws(() => {
+        execFileSync(process.execPath, [cliScriptPath, 'scan', fixturePath, '--output'], {
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      }, (err) => {
+        assert.equal(err.status, 1);
+        assert.ok(err.stderr.includes('--output requires a file path argument'));
+        return true;
+      });
+    });
+
+    it('fails with code 1 on unexpected extra positional arguments', () => {
+      const fixturePath = path.join(fixturesDir, 'simple-project');
+      assert.throws(() => {
+        execFileSync(process.execPath, [cliScriptPath, 'scan', fixturePath, 'extra-arg'], {
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      }, (err) => {
+        assert.equal(err.status, 1);
+        assert.ok(err.stderr.includes('Unexpected argument "extra-arg"'));
+        return true;
+      });
+    });
+  });
+
+  // ==========================================
+  // 5. Backward Compatibility Tests
+  // ==========================================
+  describe('Backward Compatibility', () => {
+    it('supports existing --vulnerabilities and --output scan invocation', () => {
+      const fixturePath = path.join(fixturesDir, 'simple-project');
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-compat-'));
+      const targetCdx = path.join(tmpDir, 'output.cdx.json');
+
+      try {
+        const stdout = execFileSync(
+          process.execPath,
+          ['--import', `file://${defaultMockLoaderPath}`, cliScriptPath, 'scan', fixturePath, '--output', targetCdx, '--vulnerabilities'],
+          { encoding: 'utf8' }
+        );
+
+        assert.ok(stdout.includes('Scan status: complete'));
+        assert.ok(stdout.includes('--- Vulnerability Analysis ---'));
+        assert.ok(stdout.includes('CycloneDX SBOM written to:'));
+        assert.ok(fs.existsSync(targetCdx));
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('supports existing --previous-sbom comparison option in scan', () => {
+      const fixturePath = path.join(fixturesDir, 'simple-project');
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-compat-prev-'));
+      const mockBom = {
+        bomFormat: 'CycloneDX',
+        specVersion: '1.7',
+        components: [{ name: 'old-pkg', version: '1.0.0', 'bom-ref': 'pkg:npm/old-pkg@1.0.0' }],
+      };
+      const prevBomFile = path.join(tmpDir, 'prev.cdx.json');
+      fs.writeFileSync(prevBomFile, JSON.stringify(mockBom), 'utf8');
+
+      try {
+        const stdout = execFileSync(
+          process.execPath,
+          [cliScriptPath, 'scan', fixturePath, '--previous-sbom', prevBomFile],
+          { encoding: 'utf8' }
+        );
+
+        assert.ok(stdout.includes('--- Dependency Comparison ---'));
+        assert.ok(stdout.includes('Added:'));
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
 });

@@ -80,7 +80,10 @@ npm install
 - **`npm run test:vuln`**: Runs comprehensive integration tests for vulnerability detection.
 - **`npm run test:anomaly`**: Runs unit and integration tests for SBOM anomaly detection.
 - **`npm run test:compare`**: Runs unit tests for SBOM dependency inventory comparison.
+- **`npm run test:cli`**: Runs the CLI command integration test suite.
 - **`npm run scan <path>`**: Runs the CLI scanner against a specified target project path.
+- **`npm run sbom <path>`**: Generates a CycloneDX SBOM for a target project path.
+- **`npm run audit <path>`**: Runs vulnerability and anomaly security analysis on a target project.
 - **`npm run check`**: Runs syntax validation checks across all source files using `node --check`.
 
 ## First-Party Component & Workspace Support
@@ -156,28 +159,187 @@ const purlCheck = validatePurl("pkg:npm/%40babel/core@7.24.0");
 console.log(purlCheck.valid);         // true
 ```
 
-## Command-Line Usage
+## Command-Line Interface (CLI)
+
+`npm-sbom-tool` provides a command-line interface executable via `sbom-tool`, `npm-sbom-tool`, or directly via `node src/cli.js`.
+
+### 1. Invocation & Global Options
 
 ```bash
-# Scan a project and write CycloneDX SBOM
-node src/cli.js scan fixtures/workspace-with-lockfile-project --output ./bom.cdx.json
+# Display general help and available commands
+sbom-tool --help
 
-# Scan a simple project (default output: ./sbom-output.cdx.json)
-node src/cli.js scan fixtures/simple-project
-
-# Scan a project and compare dependencies against a previous SBOM
-node src/cli.js scan fixtures/simple-project --previous-sbom ./old-bom.cdx.json
-
-# Scan a project and analyze dependencies for vulnerabilities via OSV
-node src/cli.js scan fixtures/simple-project --vulnerabilities
-
-# Specify custom output path with vulnerability detection
-node src/cli.js scan fixtures/simple-project --output ./bom.cdx.json -v
-
-# When scanning a partial project (missing lockfile), a diagnostic report is written instead:
-node src/cli.js scan fixtures/missing-lockfile-project --output ./bom.cdx.json
-# Writes: ./bom.partial.json (exits 0)
+# Display tool version
+sbom-tool --version
 ```
+
+Global options:
+- `--help, -h`: Show general help or command-specific help.
+- `--version, -V`: Display the installed version.
+
+Available commands:
+- `scan`: Scan an npm project and inspect its dependency tree.
+- `sbom`: Generate a standard CycloneDX SBOM document.
+- `audit`: Perform security vulnerability and anomaly analysis on a project.
+
+---
+
+### 2. The `scan` Command
+
+The `scan` command inspects an npm project directory, discovers manifests and lockfiles, resolves direct, transitive, and workspace dependencies, and displays a comprehensive summary.
+
+```bash
+# Basic scan of the current directory
+sbom-tool scan .
+
+# Scan a target project directory
+sbom-tool scan ./my-application
+
+# Output structured scan results in JSON format directly to stdout
+sbom-tool scan ./my-application --json
+
+# Scan and save the scan report or generated SBOM to a file
+sbom-tool scan ./my-application --output ./reports/scan-report.json
+
+# Scan with OSV vulnerability detection enabled
+sbom-tool scan ./my-application --vulnerabilities
+
+# Scan and compare dependency inventory against a previous CycloneDX SBOM
+sbom-tool scan ./my-application --previous-sbom ./prev-bom.cdx.json
+
+# Display scan-specific options
+sbom-tool scan --help
+```
+
+Supported options:
+- `--output, -o <path>`: Write scan report (or generated SBOM) to file.
+- `--json`: Output structured scan results in JSON format to stdout.
+- `--vulnerabilities, -v`: Enable OSV vulnerability analysis for discovered dependencies.
+- `--previous-sbom <path>`: Path to a previous CycloneDX SBOM JSON file for dependency comparison.
+- `--help, -h`: Show scan command help.
+
+Example terminal output:
+```text
+Scanning project: /path/to/my-application
+
+Scan status: complete
+Project: my-application@1.0.0
+Lockfile version: 3
+Components discovered: 25
+Direct dependencies: 8
+Transitive dependencies: 17
+Workspace packages: 2
+```
+
+---
+
+### 3. The `sbom` Command
+
+The `sbom` command generates an industry-standard **CycloneDX 1.7** JSON Software Bill of Materials (SBOM) for complete npm projects.
+
+```bash
+# Generate CycloneDX SBOM (defaults to ./sbom.cdx.json)
+sbom-tool sbom ./my-application
+
+# Generate CycloneDX SBOM and save to a custom file path
+sbom-tool sbom ./my-application --output ./bom.cdx.json
+sbom-tool sbom ./my-application -o ./reports/my-app-bom.json
+
+# Output CycloneDX SBOM directly to stdout (useful for piping into jq or files)
+sbom-tool sbom ./my-application --json > sbom.json
+
+# Display sbom-specific options
+sbom-tool sbom --help
+```
+
+Supported options:
+- `--output, -o <path>`: Output file path for the generated CycloneDX SBOM. Defaults to `./sbom.cdx.json` when not streaming to stdout.
+- `--json`: Output CycloneDX SBOM JSON directly to stdout without diagnostic logs.
+- `--help, -h`: Show sbom command help.
+
+Validation & Safety:
+- Automatic directory creation: Parent directories of the output path are created automatically if missing.
+- Project file protection: Rejects output paths that would overwrite project manifests (`package.json`, `package-lock.json`).
+- Directory collision check: Rejects output paths pointing to existing directories.
+- Lockfile requirement: A valid lockfile (`package-lock.json`) is required for complete SBOM generation; partial scans exit with an error.
+
+---
+
+### 4. The `audit` Command
+
+The `audit` command evaluates a target project against known security vulnerabilities (via the OSV API) and structural anomalies.
+
+```bash
+# Run both vulnerability analysis and anomaly detection (default)
+sbom-tool audit ./my-application
+
+# Run vulnerability analysis only
+sbom-tool audit ./my-application --vuln
+
+# Run anomaly analysis only
+sbom-tool audit ./my-application --anomaly
+
+# Run both analyses explicitly
+sbom-tool audit ./my-application --vuln --anomaly
+
+# Save structured audit report to a JSON file
+sbom-tool audit ./my-application --output ./audit-report.json
+
+# Output structured audit report in JSON format to stdout
+sbom-tool audit ./my-application --json
+
+# Display audit-specific options
+sbom-tool audit --help
+```
+
+Supported options:
+- `--vuln, -v`: Perform vulnerability analysis only (or explicitly).
+- `--anomaly, -a`: Perform anomaly analysis only (or explicitly).
+- `--output, -o <path>`: Output file path for the structured audit report JSON.
+- `--json`: Output structured audit report JSON directly to stdout.
+- `--help, -h`: Show audit command help.
+
+Example terminal output:
+```text
+Security Audit
+
+Project: my-application@1.0.0
+Path: /path/to/my-application
+
+Dependencies scanned: 25
+
+--- Vulnerabilities ---
+Status: COMPLETED
+Packages checked: 25/25
+Vulnerabilities found: 2
+Critical: 0
+High: 1
+Medium: 1
+Low: 0
+
+Vulnerability Findings:
+  • GHSA-p6mc-m468-83gw [CVSS_V3: 7.5] - lodash@4.17.15 (transitive) (Fixed in: 4.17.21)
+    Summary: Prototype Pollution in lodash
+
+--- Anomalies ---
+Anomalies detected: 1 (errors: 0, warnings: 1, info: 0)
+  ⚠ [MISSING_PURL] custom-pkg: Component is missing a Package URL (PURL).
+
+Audit completed (Status: completed).
+```
+
+---
+
+### 5. Error Handling & Exit Codes
+
+The CLI returns standard, meaningful process exit codes:
+
+| Exit Code | Meaning | Scenarios |
+|---|---|---|
+| `0` | Success | Command completed successfully (including complete scans, partial scans with warnings, and audits with findings). |
+| `1` | Error | Invalid command, missing/unrecognized options, nonexistent project directory, manifest parsing failure, missing lockfile for `sbom`, BOM validation failure, or file write failure. |
+
+All errors are reported with actionable human-readable messages without exposing internal stack traces by default. Diagnostic and error messages are routed to `stderr`, keeping `stdout` clean for JSON consumers.
 
 ## OSV Vulnerability API Client
 
