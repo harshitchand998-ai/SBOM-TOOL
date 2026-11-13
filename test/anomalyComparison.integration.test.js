@@ -1,6 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { scanProject } from '../src/scanner/index.js';
 
@@ -216,6 +218,85 @@ describe('Order 16: Anomaly Detection and Dependency Comparison Integration', ()
     for (const item of curr.comparison.unchanged) {
       assert.ok(typeof item.explanation === 'string');
     }
+  });
+
+  // 15. Supports previousSbom alias
+  it('15. supports previousSbom option alias identically to previousBom', async () => {
+    const prev = await scanProject(simplePath);
+    const curr = await scanProject(simplePath, { previousSbom: prev.bom });
+
+    assert.ok(curr.comparison);
+    assert.equal(curr.comparison.status, 'completed');
+    assert.equal(curr.comparison.summary.unchanged > 0, true);
+  });
+
+  // 16. Supports previous SBOM as file path string
+  it('16. loads previous SBOM directly from filesystem path string', async () => {
+    const prev = await scanProject(simplePath);
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'test-prev-sbom-'));
+    const prevFile = path.join(tmpDir, 'previous.cdx.json');
+    fs.writeFileSync(prevFile, JSON.stringify(prev.bom), 'utf8');
+
+    try {
+      const curr = await scanProject(simplePath, { previousSbom: prevFile });
+      assert.ok(curr.comparison);
+      assert.equal(curr.comparison.status, 'completed');
+      assert.ok(curr.comparison.summary.unchanged > 0);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // 17. Handles nonexistent previous SBOM path gracefully without failing scan
+  it('17. handles nonexistent previous SBOM path gracefully without failing scan or invalidating SBOM', async () => {
+    const curr = await scanProject(simplePath, { previousSbom: '/does/not/exist/prev-sbom.json' });
+
+    assert.equal(curr.status, 'complete');
+    assert.ok(curr.bom);
+    assert.ok(curr.validation?.valid);
+    assert.equal(curr.comparison, null);
+    assert.ok(curr.warnings.some(w => w.message.includes('Previous SBOM file not found')));
+  });
+
+  // 18. Handles malformed previous SBOM file gracefully
+  it('18. handles malformed previous SBOM file gracefully without failing scan or invalidating SBOM', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'test-malformed-prev-'));
+    const malformedFile = path.join(tmpDir, 'malformed.json');
+    fs.writeFileSync(malformedFile, '{ not valid json ...', 'utf8');
+
+    try {
+      const curr = await scanProject(simplePath, { previousSbom: malformedFile });
+      assert.equal(curr.status, 'complete');
+      assert.ok(curr.bom);
+      assert.ok(curr.validation?.valid);
+      assert.equal(curr.comparison, null);
+      assert.ok(curr.warnings.some(w => w.message.includes('Failed to read previous SBOM file')));
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // 19. Partial scan with previous SBOM does not compare incomplete data
+  it('19. partial scan with previous SBOM does not generate comparison on incomplete data', async () => {
+    const prev = await scanProject(simplePath);
+    const partialCurr = await scanProject(path.join(fixturesDir, 'missing-lockfile-project'), {
+      previousBom: prev.bom,
+    });
+
+    assert.equal(partialCurr.status, 'partial');
+    assert.equal(partialCurr.bom, null);
+    assert.equal(partialCurr.comparison, null);
+    assert.ok(partialCurr.warnings.some(w => w.message.includes('Dependency comparison skipped')));
+  });
+
+  // 20. Explicitly disabling anomaly detection via options.anomalies = false
+  it('20. skips anomaly detection when options.anomalies is false', async () => {
+    const result = await scanProject(simplePath, { anomalies: false });
+
+    assert.equal(result.status, 'complete');
+    assert.ok(result.bom);
+    assert.ok(result.validation?.valid);
+    assert.equal(result.anomalies, null);
   });
 });
 

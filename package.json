@@ -29,7 +29,7 @@
     "scan": "node src/cli.js scan",
     "sbom": "node src/cli.js sbom",
     "audit": "node src/cli.js audit",
-    "check": "node --check src/index.js src/engine/index.js src/scanner/index.js src/cli.js src/errors.js src/fileDiscovery.js src/parser.js src/dependencyResolver.js src/dependencyGraph.js src/workspaceDiscovery.js src/cyclonedxGenerator.js src/validator.js src/osvClient.js src/vulnerabilityMatcher.js src/vulnerabilityFindings.js src/vulnerabilityChecker.js src/anomalyDetector.js src/dependencyComparison.js"
+    "check": "node --check src/index.js && node --check src/engine/index.js && node --check src/scanner/index.js && node --check src/cli.js && node --check src/errors.js && node --check src/fileDiscovery.js && node --check src/parser.js && node --check src/dependencyResolver.js && node --check src/dependencyGraph.js && node --check src/workspaceDiscovery.js && node --check src/cyclonedxGenerator.js && node --check src/validator.js && node --check src/osvClient.js && node --check src/vulnerabilityMatcher.js && node --check src/vulnerabilityFindings.js && node --check src/vulnerabilityChecker.js && node --check src/anomalyDetector.js && node --check src/dependencyComparison.js"
   },
   "keywords": [
     "sbom",

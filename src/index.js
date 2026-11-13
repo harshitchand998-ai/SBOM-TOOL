@@ -1,4 +1,14 @@
-export { runEngine, generateSbom, default } from './engine/index.js';
+export {
+  runEngine,
+  generateSbom,
+  executeScan,
+  executeSbom,
+  executeAudit,
+  buildCombinedReport,
+  writeMultiFileOutput,
+  computeSeverityCounts,
+  default,
+} from './engine/index.js';
 export { scanProject, scanProjectSync } from './scanner/index.js';
 export { generateCycloneDX } from './cyclonedxGenerator.js';
 export { validateStructure, validateAgainstSchema, validatePurl } from './validator.js';
