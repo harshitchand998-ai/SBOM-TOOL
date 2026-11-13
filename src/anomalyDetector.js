@@ -659,9 +659,9 @@ const ANOMALY_IMPACT = Object.freeze({
 export function createAnomalyExplanation(item) {
   const compName = item.affectedComponent?.name || item.component?.name || item.affectedComponent?.bomRef || item.component?.bomRef || 'Component';
   const reason = item.message || 'An anomaly was detected.';
-  const details = item.details || '';
+  const details = item.details ? ` ${item.details}` : '';
   const impact = (item.type && ANOMALY_IMPACT[item.type]) || 'This inconsistency may impact SBOM reliability and security analysis.';
-  return `${compName} was flagged: ${reason} ${details} Why this matters: ${impact}`;
+  return `${compName} was flagged: ${reason}${details} Why this matters: ${impact}`;
 }
 
 /**

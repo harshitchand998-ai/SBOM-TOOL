@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { discoverProjectFiles } from '../fileDiscovery.js';
 import { parsePackageJson, parsePackageLock } from '../parser.js';
 import { resolveDependencies, resolveManifestOnly } from '../dependencyResolver.js';
@@ -230,22 +232,29 @@ export function scanProjectSync(projectPath) {
  * @param {string} projectPath - Path to the project directory.
  * @param {object} [options={}] - Scan options.
  * @param {boolean} [options.vulnerabilities] - Enable OSV vulnerability analysis.
- * @param {object} [options.previousBom] - Previous SBOM for dependency comparison.
+ * @param {boolean} [options.anomalies] - Whether to run anomaly detection (defaults to true for complete scans).
+ * @param {object|string} [options.previousBom] - Previous SBOM object or file path for dependency comparison.
+ * @param {object|string} [options.previousSbom] - Alias for previousBom.
  * @returns {Promise<object>} Scan result.
  */
 export async function scanProject(projectPath, options = {}) {
   const result = scanProjectSync(projectPath);
 
-  // Anomaly detection on complete scans with a valid BOM
-  if (result.status === ScanStatus.COMPLETE && result.bom && result.validation?.valid) {
+  // Anomaly detection on complete scans with a valid BOM (enabled by default)
+  if (options?.anomalies !== false && result.status === ScanStatus.COMPLETE && result.bom && result.validation?.valid) {
     try {
       const anomalyList = detectAnomalies(result.bom);
       result.anomalies = {
         findings: anomalyList,
         summary: summarizeAnomalies(anomalyList),
       };
-    } catch {
+    } catch (err) {
       // Anomaly detection failure must not invalidate the SBOM
+      result.warnings.push(createScanError(
+        ErrorCodes.SCAN_ERROR,
+        `Anomaly detection encountered an error: ${err.message}`,
+        { originalError: err.message }
+      ));
       result.anomalies = null;
     }
   }
@@ -259,12 +268,80 @@ export async function scanProject(projectPath, options = {}) {
     }
   }
 
-  // Dependency comparison when a previous SBOM is provided
-  if (options && options.previousBom) {
-    try {
-      const currentBom = result.bom || result;
-      result.comparison = compareInventories(options.previousBom, currentBom);
-    } catch {
+  // Dependency comparison when a previous SBOM is provided (previousBom or previousSbom)
+  const prevOption = options?.previousBom || options?.previousSbom;
+  if (prevOption) {
+    // Comparison results are not generated using incomplete or invalid current SBOM data
+    if (result.status === ScanStatus.COMPLETE && result.bom && result.validation?.valid) {
+      let prevBomData = null;
+      if (typeof prevOption === 'string') {
+        const trimmed = prevOption.trim();
+        if (trimmed.startsWith('{')) {
+          try {
+            prevBomData = JSON.parse(trimmed);
+          } catch (err) {
+            result.warnings.push(createScanError(
+              ErrorCodes.INVALID_PACKAGE_FILE,
+              `Malformed previous SBOM JSON string: ${err.message}`,
+              { originalError: err.message }
+            ));
+          }
+        } else {
+          try {
+            const resolvedPrevPath = path.resolve(prevOption);
+            if (!fs.existsSync(resolvedPrevPath)) {
+              result.warnings.push(createScanError(
+                ErrorCodes.PACKAGE_FILE_NOT_FOUND,
+                `Previous SBOM file not found: ${prevOption}`,
+                { file: prevOption }
+              ));
+            } else {
+              const fileContent = fs.readFileSync(resolvedPrevPath, 'utf8');
+              prevBomData = JSON.parse(fileContent);
+            }
+          } catch (err) {
+            result.warnings.push(createScanError(
+              ErrorCodes.INVALID_PACKAGE_FILE,
+              `Failed to read previous SBOM file: ${err.message}`,
+              { file: prevOption, originalError: err.message }
+            ));
+          }
+        }
+      } else if (typeof prevOption === 'object' && prevOption !== null) {
+        prevBomData = prevOption;
+      }
+
+      if (prevBomData) {
+        try {
+          const compResult = compareInventories(prevBomData, result.bom);
+          result.comparison = compResult;
+          if (compResult.status === 'failed' && compResult.errors?.length > 0) {
+            for (const cErr of compResult.errors) {
+              result.warnings.push(createScanError(
+                ErrorCodes.SCAN_ERROR,
+                `Dependency comparison warning: ${cErr.message || cErr}`,
+                { comparisonError: cErr }
+              ));
+            }
+          }
+        } catch (err) {
+          result.warnings.push(createScanError(
+            ErrorCodes.SCAN_ERROR,
+            `Dependency comparison failed: ${err.message}`,
+            { originalError: err.message }
+          ));
+          result.comparison = null;
+        }
+      } else {
+        result.comparison = null;
+      }
+    } else {
+      // Comparison skipped: complete and valid current SBOM required
+      result.warnings.push(createScanError(
+        ErrorCodes.SCAN_ERROR,
+        'Dependency comparison skipped: complete and valid current CycloneDX SBOM is required',
+        { scanStatus: result.status }
+      ));
       result.comparison = null;
     }
   }
