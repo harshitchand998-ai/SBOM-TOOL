@@ -5,6 +5,7 @@
  *
  * Supported commands:
  *   scan    Scan an npm project and inspect its dependencies.
+ *   sbom    Generate a CycloneDX SBOM for the selected project.
  */
 
 import fs from 'node:fs';
@@ -30,6 +31,7 @@ Usage:
 
 Commands:
   scan     Scan an npm project and inspect its dependencies.
+  sbom     Generate a CycloneDX SBOM for the selected project.
 
 Global Options:
   --help, -h       Show help for sbom-tool or a specific command.
@@ -39,6 +41,7 @@ Run "sbom-tool <command> --help" for detailed information on a specific command.
 
 Examples:
   sbom-tool scan ./my-project
+  sbom-tool sbom ./my-project --output ./reports/sbom.cdx.json
 `);
 }
 
@@ -62,6 +65,27 @@ Examples:
   sbom-tool scan ./my-project --output ./scan-report.json
   sbom-tool scan ./my-project --vulnerabilities
   sbom-tool scan ./my-project --previous-sbom ./prev.cdx.json
+`);
+}
+
+function printSbomHelp() {
+  console.log(`sbom-tool sbom — Generate a CycloneDX SBOM for the selected project
+
+Usage:
+  sbom-tool sbom <project-path> [options]
+
+Options:
+  --output, -o <path>    Output file path for the generated CycloneDX SBOM.
+                         (Default: ./sbom.cdx.json when not writing to stdout)
+  --json                 Output CycloneDX SBOM JSON directly to stdout.
+  --help, -h             Show this help message.
+
+Examples:
+  sbom-tool sbom .
+  sbom-tool sbom ./my-project
+  sbom-tool sbom ./my-project --output ./bom.cdx.json
+  sbom-tool sbom ./my-project -o ./reports/sbom.json
+  sbom-tool sbom ./my-project --json > sbom.json
 `);
 }
 
@@ -300,6 +324,59 @@ async function handleScan(projectPath, options) {
 }
 
 /**
+ * Executes the 'sbom' command.
+ */
+async function handleSbom(projectPath, options) {
+  const resolvedProject = path.resolve(projectPath);
+
+  let resolvedOutput = null;
+  if (options.output) {
+    resolvedOutput = validateOutputPath(options.output, resolvedProject);
+  } else if (!options.json) {
+    // Default output path when --json is not specified
+    resolvedOutput = validateOutputPath('./sbom.cdx.json', resolvedProject);
+  }
+
+  const result = await scanProject(projectPath);
+
+  if (result.status === ScanStatus.FAILED) {
+    console.error('Error: Scan failed. Unable to generate CycloneDX SBOM.');
+    if (result.errors && result.errors.length > 0) {
+      for (const err of result.errors) {
+        console.error(`  ✗ [${err.code || 'SCAN_ERROR'}] ${err.message}`);
+      }
+    }
+    process.exit(1);
+  }
+
+  if (result.status === ScanStatus.PARTIAL || !result.bom) {
+    console.error('Error: Cannot generate CycloneDX SBOM for partial scan (package-lock.json is required).');
+    process.exit(1);
+  }
+
+  if (result.validation && !result.validation.valid) {
+    console.error('Error: Generated CycloneDX SBOM failed validation:');
+    for (const valErr of result.validation.errors) {
+      console.error(`  ✗ ${valErr}`);
+    }
+    process.exit(1);
+  }
+
+  if (resolvedOutput) {
+    writeJsonFile(resolvedOutput, result.bom);
+    if (!options.json) {
+      console.log(`CycloneDX SBOM written to: ${resolvedOutput}`);
+    }
+  }
+
+  if (options.json) {
+    process.stdout.write(JSON.stringify(result.bom, null, 2) + '\n');
+  }
+
+  process.exit(0);
+}
+
+/**
  * Main CLI entry point.
  */
 async function main() {
@@ -322,10 +399,10 @@ async function main() {
   }
 
   const command = args[0];
-  const supportedCommands = ['scan'];
+  const supportedCommands = ['scan', 'sbom'];
 
   if (!supportedCommands.includes(command)) {
-    console.error(`Error: Unknown command "${command}". Available commands: scan`);
+    console.error(`Error: Unknown command "${command}". Available commands: scan, sbom`);
     console.error();
     printGeneralHelp();
     process.exit(1);
@@ -341,6 +418,7 @@ async function main() {
 
     if (arg === '--help' || arg === '-h') {
       if (command === 'scan') printScanHelp();
+      else if (command === 'sbom') printSbomHelp();
       process.exit(0);
     }
 
@@ -379,6 +457,7 @@ async function main() {
     console.error('Error: Project path is required.');
     console.error();
     if (command === 'scan') printScanHelp();
+    else if (command === 'sbom') printSbomHelp();
     process.exit(1);
   }
 
@@ -390,6 +469,8 @@ async function main() {
 
   if (command === 'scan') {
     await handleScan(projectPath, options);
+  } else if (command === 'sbom') {
+    await handleSbom(projectPath, options);
   }
 }
 

@@ -123,4 +123,132 @@ describe('CLI Commands Integration Suite', () => {
       });
     });
   });
+
+  // ==========================================
+  // 2. SBOM Command Tests
+  // ==========================================
+  describe('Command: sbom', () => {
+    it('generates a valid CycloneDX SBOM and writes to user-specified file', () => {
+      const fixturePath = path.join(fixturesDir, 'simple-project');
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-sbom-file-'));
+      const targetPath = path.join(tmpDir, 'custom-bom.json');
+
+      try {
+        const stdout = execFileSync(process.execPath, [cliScriptPath, 'sbom', fixturePath, '-o', targetPath], {
+          encoding: 'utf8',
+        });
+
+        assert.ok(stdout.includes(`CycloneDX SBOM written to: ${targetPath}`));
+        assert.ok(fs.existsSync(targetPath));
+        const bom = JSON.parse(fs.readFileSync(targetPath, 'utf8'));
+        assert.equal(bom.bomFormat, 'CycloneDX');
+        assert.equal(bom.specVersion, '1.7');
+        const validation = validateStructure(bom);
+        assert.equal(validation.valid, true);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('generates a valid CycloneDX SBOM and outputs JSON to stdout with --json', () => {
+      const fixturePath = path.join(fixturesDir, 'simple-project');
+      const stdout = execFileSync(process.execPath, [cliScriptPath, 'sbom', fixturePath, '--json'], {
+        encoding: 'utf8',
+      });
+
+      const bom = JSON.parse(stdout);
+      assert.equal(bom.bomFormat, 'CycloneDX');
+      assert.equal(bom.specVersion, '1.7');
+      assert.equal(bom.metadata.component.name, 'simple-project');
+      assert.equal(bom.components.length, 2);
+      const componentNames = bom.components.map(c => c.name);
+      assert.ok(componentNames.includes('is-odd'));
+      assert.ok(componentNames.includes('is-number'));
+      const validation = validateStructure(bom);
+      assert.equal(validation.valid, true);
+    });
+
+    it('creates nested destination directory automatically if missing', () => {
+      const fixturePath = path.join(fixturesDir, 'simple-project');
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-sbom-nested-'));
+      const targetPath = path.join(tmpDir, 'nested', 'deeply', 'reports', 'bom.cdx.json');
+
+      try {
+        execFileSync(process.execPath, [cliScriptPath, 'sbom', fixturePath, '--output', targetPath], {
+          encoding: 'utf8',
+        });
+
+        assert.ok(fs.existsSync(targetPath));
+        const bom = JSON.parse(fs.readFileSync(targetPath, 'utf8'));
+        assert.equal(bom.bomFormat, 'CycloneDX');
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects output path pointing to an existing directory', () => {
+      const fixturePath = path.join(fixturesDir, 'simple-project');
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-sbom-dir-'));
+
+      try {
+        assert.throws(() => {
+          execFileSync(process.execPath, [cliScriptPath, 'sbom', fixturePath, '--output', tmpDir], {
+            encoding: 'utf8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+        }, (err) => {
+          assert.equal(err.status, 1);
+          assert.ok(err.stderr.includes('must be a file, not a directory'));
+          return true;
+        });
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects output path attempting to overwrite project package.json', () => {
+      const fixturePath = path.join(fixturesDir, 'simple-project');
+      const pkgPath = path.join(fixturePath, 'package.json');
+
+      assert.throws(() => {
+        execFileSync(process.execPath, [cliScriptPath, 'sbom', fixturePath, '--output', pkgPath], {
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      }, (err) => {
+        assert.equal(err.status, 1);
+        assert.ok(err.stderr.includes('Cannot overwrite project file'));
+        return true;
+      });
+    });
+
+    it('rejects partial scan projects where lockfile is missing', () => {
+      const fixturePath = path.join(fixturesDir, 'missing-lockfile-project');
+
+      assert.throws(() => {
+        execFileSync(process.execPath, [cliScriptPath, 'sbom', fixturePath], {
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      }, (err) => {
+        assert.equal(err.status, 1);
+        assert.ok(err.stderr.includes('package-lock.json is required'));
+        return true;
+      });
+    });
+
+    it('fails with code 1 when scanning invalid project for SBOM generation', () => {
+      const fixturePath = path.join(fixturesDir, 'invalid-project');
+
+      assert.throws(() => {
+        execFileSync(process.execPath, [cliScriptPath, 'sbom', fixturePath], {
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      }, (err) => {
+        assert.equal(err.status, 1);
+        return true;
+      });
+    });
+  });
 });
