@@ -1,0 +1,9 @@
+{
+  "name": "malformed-lockfile-project",
+  "version": "1.0.0",
+  "description": "Project with a corrupt lockfile",
+  "dependencies": {
+    "is-odd": "3.0.1"
+  }
+}
+

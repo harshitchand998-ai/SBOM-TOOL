@@ -1,0 +1,21 @@
+{
+  "name": "large-project",
+  "version": "3.0.0",
+  "description": "A large project with many direct and transitive dependencies",
+  "dependencies": {
+    "accepts": "1.3.8",
+    "is-odd": "3.0.1",
+    "ms": "2.1.3",
+    "color-name": "1.1.4",
+    "bytes": "3.1.2",
+    "depd": "2.0.0",
+    "destroy": "1.2.0",
+    "ee-first": "1.1.1",
+    "escape-html": "1.0.3",
+    "etag": "1.8.1"
+  },
+  "devDependencies": {
+    "safer-buffer": "2.1.2"
+  }
+}
+

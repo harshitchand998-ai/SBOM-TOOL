@@ -1,0 +1,10 @@
+{
+  "name": "@monorepo/app",
+  "version": "2.0.0",
+  "description": "Application package that depends on core",
+  "dependencies": {
+    "@monorepo/core": "^1.0.0",
+    "ms": "2.1.3"
+  }
+}
+

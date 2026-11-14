@@ -1,0 +1,12 @@
+{
+  "name": "monorepo-project",
+  "version": "1.0.0",
+  "description": "A monorepo with workspace packages and external dependencies",
+  "workspaces": [
+    "packages/*"
+  ],
+  "dependencies": {
+    "ms": "2.1.3"
+  }
+}
+
