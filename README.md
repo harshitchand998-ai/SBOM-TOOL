@@ -49,6 +49,7 @@ A lightweight, reusable JavaScript engine and tool for generating Software Bill 
     ├── anomalyDetector.test.js # SBOM anomaly detection unit & integration tests
     ├── dependencyComparison.test.js # SBOM inventory comparison tests
     ├── reportGenerator.test.js # Report generation unit and integration tests
+    ├── securitySbom.test.js   # Order 21 security and CycloneDX 1.7 validation tests
     └── integration.test.js    # Full pipeline and CLI integration tests (37 scenarios)
 ```
 
@@ -84,6 +85,8 @@ npm install
 - **`npm run test:compare`**: Runs unit tests for SBOM dependency inventory comparison.
 - **`npm run test:order18`**: Runs end-to-end integration tests for Order 18 engine orchestration.
 - **`npm run test:order19`**: Runs unit and integration tests for Order 19 report generation.
+- **`npm run test:order20`**: Runs end-to-end scanner tests for Order 20.
+- **`npm run test:order21`**: Runs security and CycloneDX 1.7 SBOM validation tests for Order 21.
 - **`npm run test:cli`**: Runs the CLI command integration test suite.
 - **`npm run scan <path>`**: Runs the CLI scanner against a specified target project path.
 - **`npm run sbom <path>`**: Generates a CycloneDX SBOM for a target project path.

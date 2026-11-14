@@ -222,6 +222,23 @@ export function validateStructure(bom) {
             errors.push(`components[${i}] (${compLabel}) purl is invalid: ${purlRes.error}`);
           }
         }
+
+        if (comp.hashes !== undefined) {
+          if (!Array.isArray(comp.hashes)) {
+            errors.push(`components[${i}] (${compLabel}) hashes must be an array.`);
+          } else {
+            for (let h = 0; h < comp.hashes.length; h++) {
+              const hashObj = comp.hashes[h];
+              if (!hashObj || typeof hashObj !== 'object' || Array.isArray(hashObj)) {
+                errors.push(`components[${i}] (${compLabel}) hashes[${h}] must be an object.`);
+              } else if (!hashObj.alg || typeof hashObj.alg !== 'string' || hashObj.alg.trim() === '') {
+                errors.push(`components[${i}] (${compLabel}) hashes[${h}] is missing required field "alg".`);
+              } else if (!hashObj.content || typeof hashObj.content !== 'string' || hashObj.content.trim() === '') {
+                errors.push(`components[${i}] (${compLabel}) hashes[${h}] is missing required field "content".`);
+              }
+            }
+          }
+        }
       }
     }
   }
