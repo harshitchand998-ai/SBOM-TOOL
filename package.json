@@ -28,6 +28,7 @@
     "test:order16": "node --test test/anomalyComparison.integration.test.js",
     "test:order18": "node --test test/order18.e2e.test.js",
     "test:order19": "node --test test/reportGenerator.test.js",
+    "test:order20": "node --test test/scannerE2E.test.js",
     "scan": "node src/cli.js scan",
     "sbom": "node src/cli.js sbom",
     "audit": "node src/cli.js audit",

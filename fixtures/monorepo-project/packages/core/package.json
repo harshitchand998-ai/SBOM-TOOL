@@ -1,0 +1,9 @@
+{
+  "name": "@monorepo/core",
+  "version": "1.0.0",
+  "description": "Core utilities package",
+  "dependencies": {
+    "is-odd": "3.0.1"
+  }
+}
+

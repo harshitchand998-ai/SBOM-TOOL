@@ -13,8 +13,9 @@ export function computeSeverityCounts(findings) {
   if (!Array.isArray(findings)) return counts;
 
   for (const f of findings) {
-    const scoreVal = parseFloat(f.severity?.score);
-    const scoreStr = (f.severity?.score || '').toUpperCase();
+    const rawScore = f.severity?.score;
+    const scoreVal = parseFloat(rawScore);
+    const scoreStr = String(rawScore ?? '').toUpperCase();
 
     if (scoreStr.includes('CRITICAL') || scoreVal >= 9.0) {
       counts.critical++;
@@ -78,12 +79,12 @@ export function generateReport(scanResult, options = {}) {
     vulnerabilities: null,
     anomalies: null,
     comparison: null,
-    errors: scanResult?.errors || [],
-    warnings: scanResult?.warnings || [],
+    errors: Array.isArray(scanResult?.errors) ? [...scanResult.errors] : [],
+    warnings: Array.isArray(scanResult?.warnings) ? [...scanResult.warnings] : [],
     status: scanResult?.status || 'failed',
   };
 
-  if (scanResult?.bom) {
+  if (scanResult?.bom && scanResult?.validation?.valid !== false) {
     report.sbom = {
       format: scanResult.bom.bomFormat || 'CycloneDX',
       specVersion: scanResult.bom.specVersion || '1.7',
