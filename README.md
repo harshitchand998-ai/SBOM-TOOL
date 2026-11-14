@@ -31,6 +31,7 @@ A lightweight, reusable JavaScript engine and tool for generating Software Bill 
 │   ├── vulnerabilityChecker.js # Vulnerability pipeline orchestration
 │   ├── anomalyDetector.js     # SBOM metadata and dependency graph anomaly detection
 │   ├── dependencyComparison.js # Standalone two-SBOM inventory diff & change classifier
+│   ├── reportGenerator.js     # Structured report generation and multi-file writer
 │   └── cli.js                 # Command-line interface
 └── test/
     ├── engine.test.js         # Engine entry point tests
@@ -47,6 +48,7 @@ A lightweight, reusable JavaScript engine and tool for generating Software Bill 
     ├── vulnerabilityIntegration.test.js # End-to-end vulnerability pipeline tests
     ├── anomalyDetector.test.js # SBOM anomaly detection unit & integration tests
     ├── dependencyComparison.test.js # SBOM inventory comparison tests
+    ├── reportGenerator.test.js # Report generation unit and integration tests
     └── integration.test.js    # Full pipeline and CLI integration tests (37 scenarios)
 ```
 
@@ -80,6 +82,8 @@ npm install
 - **`npm run test:vuln`**: Runs comprehensive integration tests for vulnerability detection.
 - **`npm run test:anomaly`**: Runs unit and integration tests for SBOM anomaly detection.
 - **`npm run test:compare`**: Runs unit tests for SBOM dependency inventory comparison.
+- **`npm run test:order18`**: Runs end-to-end integration tests for Order 18 engine orchestration.
+- **`npm run test:order19`**: Runs unit and integration tests for Order 19 report generation.
 - **`npm run test:cli`**: Runs the CLI command integration test suite.
 - **`npm run scan <path>`**: Runs the CLI scanner against a specified target project path.
 - **`npm run sbom <path>`**: Generates a CycloneDX SBOM for a target project path.
@@ -743,9 +747,45 @@ const auditReport = await executeAudit('./my-project', {
   previousSbom: './prev-bom.cdx.json',
 });
 
-// 4. Build comprehensive combined report object
+// 4. Build comprehensive combined report object (aliased to generateReport)
 const report = buildCombinedReport(scanResult);
 
-// 5. Write standard multi-file report directory (sbom.json, vulnerabilities.json, anomalies.json, report.json)
-writeMultiFileOutput('./output', scanResult);
+// 5. Write standard four output files (sbom.json, vulnerabilities.json, anomalies.json, report.json)
+generateReportFiles('./output', scanResult);
+```
+
+## Report Generation (Order 19)
+
+The report generation module (`src/reportGenerator.js`) consumes scan results produced by the engine and outputs structured data and files:
+
+### Output Files
+
+When running a full scan or specifying an output directory (`--full`, `-o <dir>`, `--output-dir <dir>`), four structured JSON files are generated:
+
+1. **`sbom.json`**: CycloneDX 1.7 JSON Software Bill of Materials (valid against schema).
+2. **`vulnerabilities.json`**: Vulnerability findings, severity breakdown, and any query errors/warnings (or `{ "status": "skipped" }` if analysis was disabled).
+3. **`anomalies.json`**: Structural and metadata anomalies detected across components and the dependency graph (or `{ "status": "skipped" }` if disabled).
+4. **`report.json`**: Combined structured summary containing:
+   - **Project Details**: Project name, version, status, and scan metadata.
+   - **Component Statistics**: Total, direct, transitive, and workspace component counts.
+   - **Vulnerability Summary**: Severity breakdown (`critical`, `high`, `medium`, `low`, `unknown`) and total finding counts.
+   - **Anomaly Summary**: Total anomaly counts grouped by severity (`error`, `warning`, `info`) and category type.
+   - **Dependency Comparison**: Detailed summary of added, removed, modified, and unchanged dependencies when a previous SBOM is supplied.
+
+### Status & Edge Case Handling
+
+- **Zero Findings vs. Skipped vs. Failed**:
+  - **Zero findings**: Represented with `status: 'completed'` and `summary.total: 0`.
+  - **Skipped analysis**: Represented with `null` in `report.json` and `{ "status": "skipped", "reason": "..." }` in dedicated artifact files. Never reported as 0 findings.
+  - **Failed analysis**: Recorded with `status: 'failed'` and an `errors` array; failure in vulnerability or anomaly analysis does not mark the core SBOM generation as failed.
+  - **Partial scan**: If dependency resolution is partial or lockfile is missing, `report.json` reflects `status: 'partial'` while preserving discovered components.
+
+### CLI Usage
+
+```bash
+# Run full scan producing all 4 JSON files in default ./output directory
+node src/cli.js scan ./my-project --full
+
+# Specify custom output directory
+node src/cli.js scan ./my-project --full -o ./reports
 ```

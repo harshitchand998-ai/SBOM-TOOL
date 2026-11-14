@@ -26,10 +26,12 @@
     "test:anomaly": "node --test test/anomalyDetector.test.js",
     "test:compare": "node --test test/dependencyComparison.test.js",
     "test:order16": "node --test test/anomalyComparison.integration.test.js",
+    "test:order18": "node --test test/order18.e2e.test.js",
+    "test:order19": "node --test test/reportGenerator.test.js",
     "scan": "node src/cli.js scan",
     "sbom": "node src/cli.js sbom",
     "audit": "node src/cli.js audit",
-    "check": "node --check src/index.js && node --check src/engine/index.js && node --check src/scanner/index.js && node --check src/cli.js && node --check src/errors.js && node --check src/fileDiscovery.js && node --check src/parser.js && node --check src/dependencyResolver.js && node --check src/dependencyGraph.js && node --check src/workspaceDiscovery.js && node --check src/cyclonedxGenerator.js && node --check src/validator.js && node --check src/osvClient.js && node --check src/vulnerabilityMatcher.js && node --check src/vulnerabilityFindings.js && node --check src/vulnerabilityChecker.js && node --check src/anomalyDetector.js && node --check src/dependencyComparison.js"
+    "check": "node --check src/index.js && node --check src/engine/index.js && node --check src/scanner/index.js && node --check src/cli.js && node --check src/errors.js && node --check src/fileDiscovery.js && node --check src/parser.js && node --check src/dependencyResolver.js && node --check src/dependencyGraph.js && node --check src/workspaceDiscovery.js && node --check src/cyclonedxGenerator.js && node --check src/validator.js && node --check src/osvClient.js && node --check src/vulnerabilityMatcher.js && node --check src/vulnerabilityFindings.js && node --check src/vulnerabilityChecker.js && node --check src/anomalyDetector.js && node --check src/dependencyComparison.js && node --check src/reportGenerator.js"
   },
   "keywords": [
     "sbom",
