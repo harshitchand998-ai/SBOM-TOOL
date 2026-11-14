@@ -421,4 +421,59 @@ describe('Order 19: Report Generation (src/reportGenerator.js)', () => {
       assert.equal(writeMultiFileOutput, generateReportFiles);
     });
   });
+
+  // ========================================================
+  // 6. Order 19 Audit Regression Tests
+  // ========================================================
+  describe('Audit Regression: Bug Fixes', () => {
+    it('computeSeverityCounts handles numeric severity scores without throwing', () => {
+      const findings = [
+        { id: 'V1', severity: { score: 9.5 } },
+        { id: 'V2', severity: { score: 7.2 } },
+        { id: 'V3', severity: { score: 5.0 } },
+        { id: 'V4', severity: { score: 2.5 } },
+        { id: 'V5', severity: { score: 0 } },
+      ];
+
+      const counts = computeSeverityCounts(findings);
+      assert.equal(counts.critical, 1);
+      assert.equal(counts.high, 1);
+      assert.equal(counts.medium, 1);
+      assert.equal(counts.low, 1);
+      assert.equal(counts.unknown, 1);
+    });
+
+    it('generateReport excludes sbom section when bom exists but validation fails', () => {
+      const scanResult = {
+        status: 'complete',
+        projectMetadata: { name: 'test-app', version: '1.0.0' },
+        projectPath: '/test',
+        components: [],
+        bom: { bomFormat: 'CycloneDX', specVersion: '1.7', components: [], dependencies: [] },
+        validation: { valid: false, errors: ['Missing required field'], warnings: [] },
+        vulnerabilities: null,
+        anomalies: null,
+      };
+
+      const report = generateReport(scanResult);
+      assert.equal(report.sbom, null, 'sbom section must be null when validation.valid is false');
+    });
+
+    it('generateReport defensive copies errors and warnings arrays', () => {
+      const scanResult = {
+        status: 'complete',
+        projectMetadata: { name: 'test', version: '1.0.0' },
+        projectPath: '/test',
+        components: [],
+        errors: [{ code: 'TEST_ERR', message: 'err' }],
+        warnings: [{ code: 'TEST_WARN', message: 'warn' }],
+      };
+
+      const report = generateReport(scanResult);
+      assert.notEqual(report.errors, scanResult.errors);
+      assert.notEqual(report.warnings, scanResult.warnings);
+      report.warnings.push({ code: 'MUTATED', message: 'mutated' });
+      assert.equal(scanResult.warnings.length, 1);
+    });
+  });
 });
